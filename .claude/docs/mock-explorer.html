@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Disk Atlas explorer window</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;700&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+body{margin:0;--bg:#F5F5F3;--surface:#FFFFFF;--hover:#ECECE9;--line:#E3E4E0;--ink:#1A1A1A;--ink2:#555853;--ink3:#6B6E69;--mark:#C2185B;--onMark:#FFFFFF;--relief:#2B2C2A}
+.night{--bg:#1F1F1E;--surface:#171716;--hover:#2A2A28;--line:#30312E;--ink:#EDEDEB;--ink2:#B5B7B2;--ink3:#93958F;--mark:#C2185B;--onMark:#FFFFFF;--relief:#D9DAD5}
+button,input{font:inherit;color:inherit}
+input::placeholder{color:var(--ink3);opacity:1}
+a{color:#B0144F}a:hover{color:#1A1A1A}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="min-height: 860px; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); font-family: 'Atkinson Hyperlegible Next', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.3; font-variant-numeric: tabular-nums">
+
+<!-- One bar: navigation, location, search, window controls -->
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 44px; padding-left: 10px">
+<button aria-label="Back" style="width: 28px; height: 28px; background: transparent; border: 0; border-radius: 6px; cursor: pointer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14"><path d="M8.5 3L4.5 7l4 4" style="fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round"></path></svg></button>
+<button aria-label="Forward" style="width: 28px; height: 28px; background: transparent; border: 0; border-radius: 6px; cursor: pointer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14"><path d="M5.5 3l4 4-4 4" style="fill: none; stroke: var(--ink3); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round"></path></svg></button>
+<div style="flex: 3 1 280px; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px; white-space: nowrap; overflow: hidden">
+<span style="color: var(--ink3)">Macintosh HD</span>
+<svg aria-hidden="true" width="6" height="10" viewBox="0 0 6 10" style="flex: none"><path d="M1 1l4 4-4 4" style="fill: none; stroke: var(--ink3); stroke-linecap: round; stroke-linejoin: round"></path></svg>
+<span style="color: var(--ink3)">Users</span>
+<svg aria-hidden="true" width="6" height="10" viewBox="0 0 6 10" style="flex: none"><path d="M1 1l4 4-4 4" style="fill: none; stroke: var(--ink3); stroke-linecap: round; stroke-linejoin: round"></path></svg>
+<span style="color: var(--ink3)">julian</span>
+<svg aria-hidden="true" width="6" height="10" viewBox="0 0 6 10" style="flex: none"><path d="M1 1l4 4-4 4" style="fill: none; stroke: var(--ink3); stroke-linecap: round; stroke-linejoin: round"></path></svg>
+<span style="font-weight: 700">Projects</span>
+</div>
+<div style="flex: 1 1 220px; max-width: 300px; display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; background: var(--hover); border-radius: 6px; box-sizing: border-box">
+<label for="find" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Search Macintosh HD</label>
+<input id="find" type="text" placeholder="Search Macintosh HD" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; padding: 0">
+<span style="color: var(--ink3); white-space: nowrap">Ctrl F</span>
+</div>
+<button aria-label="List view" style="width: 28px; height: 28px; margin-left: 6px; background: var(--hover); border: 0; border-radius: 6px; cursor: pointer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14"><path d="M2 3.5h10M2 7h10M2 10.5h10" style="fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round"></path></svg></button>
+<button aria-label="Icon view" style="width: 28px; height: 28px; background: transparent; border: 0; border-radius: 6px; cursor: pointer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14"><path d="M2 2h4v4H2zM8 2h4v4H8zM2 8h4v4H2zM8 8h4v4H8z" style="fill: var(--ink3)"></path></svg></button>
+<div style="display: flex; margin-left: 10px">
+<button aria-label="Minimize" style="width: 42px; height: 44px; background: transparent; border: 0; cursor: pointer"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><path d="M1.5 6.5h9" style="fill: none; stroke: var(--ink2)"></path></svg></button>
+<button aria-label="Maximize" style="width: 42px; height: 44px; background: transparent; border: 0; cursor: pointer"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1.5" style="fill: none; stroke: var(--ink2)"></rect></svg></button>
+<button aria-label="Close" style="width: 42px; height: 44px; background: transparent; border: 0; cursor: pointer"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" style="fill: none; stroke: var(--ink2)"></path></svg></button>
+</div>
+</div>
+
+<!-- Body -->
+<div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+
+<!-- Sidebar -->
+<div style="flex: 1 1 206px; max-width: 100%; display: flex; flex-direction: column; gap: 16px; padding: 6px 8px 10px; box-sizing: border-box">
+<sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+<div style="display: flex; flex-direction: column; gap: 1px">
+<div style="padding: 0 8px 3px; font-size: 12px; color: var(--ink3)">{{g.title}}</div>
+<sc-for list="{{g.devices}}" as="d" hint-placeholder-count="2">
+<div style="display: flex; flex-direction: column; gap: 1px">
+<div style="display: flex; align-items: center; height: 26px; padding: 0 8px; color: var(--ink2)">
+<span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{d.name}}</span>
+<span style="font-size: 12px; color: var(--ink3); white-space: nowrap">{{d.size}}</span>
+</div>
+<sc-for list="{{d.vols}}" as="v" hint-placeholder-count="2">
+<button style="display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px 0 10px; background: {{v.bg}}; border: 0; border-radius: 6px; cursor: pointer; text-align: left; font-weight: {{v.weight}}">
+<span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: {{v.dot}}"></span>
+<span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{v.name}}</span>
+<span style="font-size: 12px; font-weight: 400; color: var(--ink3)">{{v.fs}}</span>
+</button>
+</sc-for>
+</div>
+</sc-for>
+</div>
+</sc-for>
+<div style="flex: 1"></div>
+<button style="height: 28px; background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--ink2); cursor: pointer">Open disk image</button>
+</div>
+
+<!-- Content panel -->
+<div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: var(--surface); border-top: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 10px 0 0 0">
+
+<!-- Disk strip: every partition to scale, shaded by how full each region is -->
+<div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 12px">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px">
+<span style="font-weight: 700">Samsung T7</span>
+<span style="color: var(--ink3)">931.5 GB, read-only</span>
+<span style="flex: 1"></span>
+<span style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink3)"><span style="width: 2px; height: 11px; background: var(--mark)"></span>Selected file, stored in 3 pieces</span>
+</div>
+<div style="display: flex; gap: 2px">
+<div style="flex: 0 0 3px; height: 16px; background: var(--relief); opacity: 0.35; border-radius: 2px 0 0 2px"></div>
+<div style="flex: 465 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+<div style="position: relative; height: 16px">
+<div style="display: flex; height: 100%; overflow: hidden"><sc-for list="{{reliefA}}" as="c" hint-placeholder-count="40"><div style="flex: 1; background: var(--relief); opacity: {{c.o}}"></div></sc-for></div>
+<div style="position: absolute; top: -4px; bottom: -4px; left: 31.2%; width: 2px; background: var(--mark)"></div>
+<div style="position: absolute; top: -4px; bottom: -4px; left: 32.1%; width: 2px; background: var(--mark)"></div>
+<div style="position: absolute; top: -4px; bottom: -4px; left: 57.4%; width: 2px; background: var(--mark)"></div>
+</div>
+<div style="font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis"><span style="font-weight: 700">Macintosh HD</span> <span style="color: var(--ink3)">252.7 of 465.1 GB used</span></div>
+</div>
+<div style="flex: 400 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+<div style="display: flex; height: 16px; overflow: hidden; opacity: 0.45"><sc-for list="{{reliefB}}" as="c" hint-placeholder-count="40"><div style="flex: 1; background: var(--relief); opacity: {{c.o}}"></div></sc-for></div>
+<div style="font-size: 12px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Time Machine, 400 GB</div>
+</div>
+<div style="flex: 66 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+<div style="height: 16px; border: 1px dashed var(--line); border-radius: 0 2px 2px 0; box-sizing: border-box"></div>
+<div style="font-size: 12px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Free</div>
+</div>
+</div>
+</div>
+
+<!-- List + details -->
+<div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0; border-top: 1px solid var(--line)">
+
+<div style="flex: 999 1 460px; min-width: 0; overflow-x: auto; padding: 4px 0">
+<div style="min-width: 690px">
+<div style="display: grid; grid-template-columns: minmax(220px, 1fr) 128px 72px 84px 180px; column-gap: 14px; align-items: center; height: 28px; margin: 0 6px; padding: 0 10px; font-size: 12px; color: var(--ink3)">
+<div>Name</div><div>Modified</div><div style="text-align: right">Size</div><div style="text-align: right">Resource fork</div><div>Kind</div>
+</div>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="14">
+<div style="display: grid; grid-template-columns: minmax(220px, 1fr) 128px 72px 84px 180px; column-gap: 14px; align-items: center; height: 28px; margin: 0 6px; padding: 0 10px; border-radius: 6px; background: {{r.bg}}; color: {{r.fg}}">
+<div style="display: flex; align-items: center; gap: 9px; min-width: 0">
+<sc-if value="{{r.isDir}}" hint-placeholder-val="{{true}}"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" style="flex: none"><path d="M1.5 4.2c0-.7.5-1.2 1.2-1.2h3.1l1.5 1.6h6c.7 0 1.2.5 1.2 1.2v6c0 .7-.5 1.2-1.2 1.2H2.7c-.7 0-1.2-.5-1.2-1.2z" style="fill: {{r.icon}}"></path></svg></sc-if>
+<sc-if value="{{r.isFile}}" hint-placeholder-val="{{false}}"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" style="flex: none"><path d="M4 2h5l3 3v9H4z" style="fill: none; stroke: {{r.icon}}; stroke-width: 1.2; stroke-linejoin: round"></path></svg></sc-if>
+<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: {{r.slant}}">{{r.name}}</span>
+</div>
+<div style="color: {{r.fg2}}; white-space: nowrap">{{r.date}}</div>
+<div style="color: {{r.fg2}}; text-align: right">{{r.size}}</div>
+<div style="color: {{r.fg2}}; text-align: right">{{r.rsrc}}</div>
+<div style="color: {{r.fg2}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.kind}}</div>
+</div>
+</sc-for>
+<div style="display: flex; gap: 16px; margin: 0 6px; padding: 12px 10px 8px; font-size: 12px; color: var(--ink3)"><span>17 items</span><span>212.4 GB free</span><span>Search index up to date</span></div>
+</div>
+</div>
+
+<!-- Details -->
+<div style="flex: 1 1 260px; max-width: 100%; display: flex; flex-direction: column; gap: 14px; padding: 16px; border-left: 1px solid var(--line); box-sizing: border-box">
+<div style="height: 132px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--hover); font-size: 12px; color: var(--ink3)">Preview, 2880 × 1800</div>
+<div style="display: flex; flex-direction: column; gap: 2px">
+<span style="font-weight: 700; font-size: 14px; overflow-wrap: anywhere">Screen Shot 2014-03-02.png</span>
+<span style="color: var(--ink3)">PNG image, 1.8 MB</span>
+</div>
+<div style="display: grid; grid-template-columns: 84px minmax(0, 1fr); row-gap: 7px; column-gap: 10px; font-size: 12px">
+<span style="color: var(--ink3)">Created</span><span>2 Mar 2014, 14:07</span>
+<span style="color: var(--ink3)">Modified</span><span>2 Mar 2014, 14:07</span>
+<span style="color: var(--ink3)">Owner</span><span>julian, read and write</span>
+<span style="color: var(--ink3)">Type, creator</span><span>PNGf, prvw</span>
+<span style="color: var(--ink3)">On disk</span><span>3 pieces from block 37,912,004</span>
+<span style="color: var(--ink3)">Attributes</span><span>1 extended attribute</span>
+</div>
+<div style="flex: 1"></div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<button style="height: 30px; background: var(--ink); border: 0; border-radius: 6px; color: var(--surface); font-weight: 700; cursor: pointer">Copy to this computer</button>
+<button style="display: flex; align-items: center; justify-content: space-between; height: 30px; padding: 0 12px; background: transparent; border: 1px solid var(--line); border-radius: 6px; cursor: pointer"><span>Quick Look</span><span style="font-size: 12px; color: var(--ink3)">Space</span></button>
+</div>
+</div>
+
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["Day","Night"],"default":"Day"},"$preview":{"width":1360,"height":860}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var night = (this.props.theme ?? 'Day') === 'Night';
+    var selected = 'Screen Shot 2014-03-02.png';
+    var raw = [
+      ['Archive 2019', '12 Jan 2020, 09:41', '', '', 'Folder', 1, 0],
+      ['Client Work', '30 Aug 2021, 17:22', '', '', 'Folder', 1, 0],
+      ['Fonts', '4 Nov 2016, 11:05', '', '', 'Folder', 1, 0],
+      ['Icon Sets', '19 Feb 2018, 20:48', '', '', 'Folder', 1, 0],
+      ['Scans', '7 Jun 2015, 08:13', '', '', 'Folder, hard-linked', 1, 0],
+      ['Annual Report.pages', '21 Mar 2021, 16:30', '4.2 MB', '', 'Pages document', 0, 0],
+      ['Budget 2021.numbers', '2 Apr 2021, 10:02', '612 KB', '', 'Numbers spreadsheet', 0, 0],
+      ['Interview raw.aiff', '15 Sep 2019, 13:55', '148.3 MB', '', 'AIFF audio', 0, 0],
+      ['kernelcache', '28 Oct 2020, 03:12', '31.7 MB', '', 'Document, compressed', 0, 0],
+      ['Logo Final.psd', '9 Dec 2017, 22:41', '86.4 MB', '12 KB', 'Photoshop image', 0, 0],
+      ['Old Site.sit', '3 May 2004, 19:27', '9.8 MB', '2 KB', 'StuffIt archive', 0, 0],
+      ['ReadMe.txt', '3 May 2004, 19:20', '2 KB', '', 'Plain text', 0, 0],
+      ['Screen Shot 2014-03-02.png', '2 Mar 2014, 14:07', '1.8 MB', '', 'PNG image', 0, 0],
+      ['Shared Notes', '11 Jul 2019, 09:00', '18 bytes', '', 'Link to ../Shared/Notes', 0, 1],
+      ['Thesis draft 3.doc', '26 Jan 2009, 23:58', '1.1 MB', '', 'Word document, 2 hard links', 0, 0],
+      ['Tour Dates.txt', '14 Aug 2012, 12:36', '4 KB', '', 'Plain text', 0, 0],
+      ['Untitled.textClipping', '1 Oct 2010, 15:44', '0 bytes', '1 KB', 'Text clipping', 0, 0]
+    ];
+    var rows = raw.map(function (r) {
+      var sel = r[0] === selected;
+      return {
+        name: r[0], date: r[1], size: r[2], rsrc: r[3], kind: r[4],
+        isDir: !!r[5], isFile: !r[5],
+        slant: r[6] ? 'italic' : 'normal',
+        bg: sel ? 'var(--mark)' : 'transparent',
+        fg: sel ? 'var(--onMark)' : 'var(--ink)',
+        fg2: sel ? 'var(--onMark)' : 'var(--ink2)',
+        icon: sel ? 'var(--onMark)' : 'var(--ink3)'
+      };
+    });
+    function vol(name, fs, here) {
+      return {
+        name: name, fs: fs,
+        bg: here ? 'var(--hover)' : 'transparent',
+        dot: here ? 'var(--mark)' : 'var(--line)',
+        weight: here ? 700 : 400
+      };
+    }
+    var groups = [
+      { title: 'Disks', devices: [
+        { name: 'Samsung T7', size: '931.5 GB', vols: [vol('Macintosh HD', 'HFS+', true), vol('Time Machine', 'HFSX'), vol('EFI', 'FAT32')] },
+        { name: 'iPod classic', size: '148.9 GB', vols: [vol('iPod', 'HFS+')] }
+      ] },
+      { title: 'Disk images', devices: [
+        { name: 'Install macOS.dmg', size: '5.7 GB', vols: [vol('Install ESD', 'HFS+')] },
+        { name: 'System 7.5.img', size: '80 MB', vols: [vol('System 7.5', 'HFS')] }
+      ] },
+      { title: 'This computer', devices: [
+        { name: 'Internal SSD', size: '1.8 TB', vols: [vol('Windows (C:)', 'NTFS'), vol('Data (X:)', 'NTFS')] }
+      ] }
+    ];
+    function relief(n, seed, shape) {
+      var out = [], s = seed;
+      for (var i = 0; i < n; i++) {
+        s = (s * 9301 + 49297) % 233280;
+        var o = shape(i / n) + (s / 233280 - 0.5) * 0.3;
+        out.push({ o: Math.max(0.06, Math.min(1, o)).toFixed(2) });
+      }
+      return out;
+    }
+    var reliefA = relief(110, 7, function (x) {
+      if (x < 0.36) return 0.84;
+      if (x < 0.5) return 0.56;
+      if (x > 0.55 && x < 0.6) return 0.78;
+      if (x < 0.78) return 0.28;
+      return 0.1;
+    });
+    var reliefB = relief(94, 23, function (x) { return x < 0.68 ? 0.8 : (x < 0.74 ? 0.4 : 0.08); });
+    return { themeClass: night ? 'night' : 'day', rows: rows, groups: groups, reliefA: reliefA, reliefB: reliefB };
+  }
+}
+</script>
+</body>
+</html>

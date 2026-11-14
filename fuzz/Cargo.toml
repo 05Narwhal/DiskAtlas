@@ -1,0 +1,91 @@
+[package]
+name = "disk-atlas-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+disk-atlas-lib = { path = "../crates/lib" }
+
+# Keeps the fuzz crate out of the main workspace, so the workspace builds on
+# stable without it.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "probe"
+path = "fuzz_targets/probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "partition_map"
+path = "fuzz_targets/partition_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hfsplus_volume_header"
+path = "fuzz_targets/hfsplus_volume_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hfsplus_mount"
+path = "fuzz_targets/hfsplus_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hfsplus_journal"
+path = "fuzz_targets/hfsplus_journal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decmpfs"
+path = "fuzz_targets/decmpfs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udif"
+path = "fuzz_targets/udif.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sparseimage"
+path = "fuzz_targets/sparseimage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plist"
+path = "fuzz_targets/plist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_index_load"
+path = "fuzz_targets/search_index_load.rs"
+test = false
+doc = false
+bench = false

@@ -1,6 +1,111 @@
-[package]
-name = "disk-atlas"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = [
+    "crates/app",
+    "crates/lib",
+]
 
-[dependencies]
+[workspace.package]
+version = "26.0.1-alpha"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Julian A. Loy"]
+description = "A fast, extensible cross-platform filesystem explorer."
+repository = "https://github.com/05Narwhal/DiskAtlas"
+homepage = "https://github.com/05Narwhal/DiskAtlas"
+
+# Dependency policy: every version is declared here once and crates opt in
+# with `workspace = true`. A new entry needs the main session's approval, a
+# GPL-3.0-or-later compatible license, and a use in the same change.
+[workspace.dependencies]
+disk-atlas-lib = { path = "crates/lib" }
+
+# UI framework. Pinned exactly: the GPUI API changes between releases.
+gpui = "=0.2.2"
+
+# Shared utilities
+anyhow = "1"
+# Local time for dates in the interface. std has no time zone support.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+thiserror = "2"
+tracing = "0.1"
+
+# decmpfs (HFS+ and APFS file compression). zlib through miniz_oxide (pure
+# Rust, already in the lock file through GPUI). LZFSE and LZVN through
+# lzfse_rust (approved by Julian on 2026-11-10; LZVN chunks are decoded as
+# LZFSE `bvxn` blocks).
+lzfse_rust = "0.2"
+miniz_oxide = "0.8"
+
+# Disk image readers (approved by Julian on 2026-11-10). UDIF bzip2 chunks
+# through bzip2 0.6, whose default backend is the pure-Rust libbz2-rs-sys
+# (MIT OR Apache-2.0; libbz2-rs-sys is under the bzip2-1.0.6 licence, a
+# permissive BSD-style licence). lzma-rs (MIT) is a dev-dependency only, to
+# encode test xz streams: it cannot bound memory on hostile input, so UDIF
+# LZMA chunks use an in-house decoder. Property lists through quick-xml (MIT) and base64
+# (MIT OR Apache-2.0), on the versions GPUI already puts in the lock file.
+base64 = "0.22"
+bzip2 = "0.6"
+lzma-rs = "0.3"
+quick-xml = "0.41"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Search (approved by Julian on 2026-11-11, M4). Parallel query scan, index
+# build and result sorting through rayon (MIT OR Apache-2.0); substring
+# search through memchr's memmem (Unlicense OR MIT). Both already in the
+# lock file through GPUI.
+memchr = "2"
+rayon = "1"
+
+# SHA-256 for the Properties checksum section (R18.3). Approved by Julian on
+# 2026-11-14 (README decision 9). RustCrypto, MIT OR Apache-2.0, already in the
+# lock file through GPUI; the 0.10 line is the one the APFS design names.
+sha2 = "0.10"
+
+# Windows FFI for physical disk queries (DeviceIoControl) and the app's
+# "Restart as administrator" (ShellExecuteExW, token elevation). Already in
+# the lock file through GPUI; keep it on the same minor version.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+# GPUI's own idiom is `&mut Context<Self>`; requiring `Context<'_, Self>` fights every example.
+elided_lifetimes_in_paths = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+undocumented_unsafe_blocks = "deny"
+
+# GPUI is unusable unoptimized; our own crates stay at opt-level 0 for fast rebuilds.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Unwinding is kept on purpose: a parser bug in one volume must not take the app down.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+
+# Optimized build that links quickly and keeps line tables, for traced timings.
+[profile.profiling]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"

@@ -1,0 +1,36 @@
+[package]
+name = "disk-atlas-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[lib]
+name = "disk_atlas_lib"
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+bzip2.workspace = true
+lzfse_rust.workspace = true
+memchr.workspace = true
+miniz_oxide.workspace = true
+notify = "8.2"
+quick-xml.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+# lzma-rs only encodes test fixtures; UDIF LZMA chunks use the in-house
+# decoder in image/udif/lzma.rs.
+[dev-dependencies]
+lzma-rs.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[lints]
+workspace = true
