@@ -428,3 +428,23 @@ fn probe_names_and_mounts_a_container() {
     assert_eq!(vols[1].name, "Second");
     assert_eq!(vols[1].role, None);
 }
+
+#[test]
+fn the_standard_seed_volume_mounts_and_reads() {
+    use crate::fs::apfs::test_container::standard_volume;
+    for incompatible in [0, 0x9] {
+        let fs = one(standard_volume("Atlas", incompatible));
+        let mut count = 0;
+        fs.scan(&mut |e| {
+            if e.kind == NodeKind::File
+                && let Ok(src) = fs.open(e.node, Stream::Data)
+            {
+                read_all(&*src);
+            }
+            count += 1;
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(count, 19);
+    }
+}

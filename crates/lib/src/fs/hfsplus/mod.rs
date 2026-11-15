@@ -1581,12 +1581,9 @@ mod tests {
                 .and_then(probe::Mount::into_volume);
             assert_eq!(fs.unwrap().info().name, "Test Volume");
         }
-        for content in [
-            Content::Apfs,
-            Content::Ntfs,
-            Content::Empty,
-            Content::Unknown,
-        ] {
+        // APFS has a reader: HFS+ bytes are no container.
+        assert!(probe::mount(source(bytes.clone()), Content::Apfs).is_err());
+        for content in [Content::Ntfs, Content::Empty, Content::Unknown] {
             assert!(
                 probe::mount(source(bytes.clone()), content)
                     .unwrap()

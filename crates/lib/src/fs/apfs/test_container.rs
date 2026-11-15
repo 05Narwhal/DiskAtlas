@@ -989,3 +989,47 @@ fn write_volume(
     img.put(paddr, b);
     paddr
 }
+
+/// A volume with one of each kind of item: folders, a fragmented file with
+/// attributes and a resource fork, a symlink, files compressed in the
+/// attribute and in the resource fork. For seeds and end-to-end tests.
+pub(crate) fn standard_volume(name: &str, incompatible: u64) -> VolumeSpec {
+    use crate::fs::hfsplus::compression::fixtures as cmp;
+    let mut fs = FsSpec::new();
+    let docs = fs.folder(2, "Documents");
+    let content: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 253) as u8).collect();
+    let big = fs.file(docs, "big.bin", &content);
+    fs.item(big).fragments = 2;
+    fs.xattr(big, "user.small", b"hello", false);
+    fs.xattr(big, "user.large", &[0xAB; 5000], true);
+    fs.xattr(big, "com.apple.ResourceFork", &[0xCD; 3000], true);
+    fs.symlink(2, "link", "Documents/big.bin");
+    let plain = cmp::content(6000);
+    let mut inline = cmp::header(3, plain.len() as u64);
+    inline.extend_from_slice(&cmp::zlib(&plain));
+    fs.compressed(docs, "inline.txt", inline, None);
+    let chunks: Vec<Vec<u8>> = cmp::pieces(&content)
+        .into_iter()
+        .map(cmp::lzvn_literals)
+        .collect();
+    fs.compressed(
+        docs,
+        "forked.bin",
+        cmp::header(8, content.len() as u64),
+        Some(cmp::offsets_fork(&chunks)),
+    );
+    let sub = fs.folder(docs, "Nested");
+    for i in 0..12 {
+        fs.file(
+            sub,
+            &format!("note {i}.txt"),
+            format!("note {i}").as_bytes(),
+        );
+    }
+    fs.file(2, ".hidden", b"x");
+    let mut spec = VolumeSpec::new(name);
+    spec.incompatible = incompatible;
+    spec.fs = fs;
+    spec.per_node = 6;
+    spec
+}

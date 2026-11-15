@@ -18,12 +18,29 @@
 use std::fs;
 use std::path::Path;
 
-use super::test_container::{BS, ContainerBuilder};
+use super::test_container::{BS, ContainerBuilder, VolumeSpec, standard_volume};
 
 /// Containers for the mount target.
 fn containers() -> Vec<(&'static str, Vec<u8>)> {
     vec![
-        ("apfs-standard", ContainerBuilder::new().build().image),
+        (
+            "apfs-standard",
+            ContainerBuilder::new()
+                .volumes(vec![standard_volume("Atlas", 0)])
+                .free_blocks(16)
+                .build()
+                .image,
+        ),
+        (
+            "apfs-two-volumes-insensitive",
+            ContainerBuilder::new()
+                .volumes(vec![
+                    standard_volume("Macintosh HD", 0x9),
+                    VolumeSpec::new("Empty"),
+                ])
+                .build()
+                .image,
+        ),
         (
             "apfs-stale-block-zero",
             ContainerBuilder::new()
