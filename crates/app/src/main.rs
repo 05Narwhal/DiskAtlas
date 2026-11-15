@@ -20,6 +20,7 @@ mod elevation;
 mod format;
 mod frame_trace;
 mod keymap;
+mod ops;
 mod platform;
 mod preview;
 mod state;
