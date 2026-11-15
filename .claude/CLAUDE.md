@@ -47,13 +47,15 @@ This repository runs a team of models. This replaces the global default of a Son
 |---|---|---|
 | Main session (Opus or Sonnet) | Lead | Runs the roadmap from the designs: writes the briefs, reviews every change, integrates, reports to Julian. Decides small things and records them under "Changes during build" in the design file |
 | Fable | Architect, on call | Wrote the designs and the interfaces they stand on. Needed again only for the stop-and-ask cases in `.claude/docs/design/README.md` rule 4: a design that turns out wrong, a real disk that contradicts it, a budget missed by more than 2x |
-| `opus-engineer` | Senior implementer | Hard, well-specified implementation: B-trees, extent and fork readers, decompression, journal overlay, the search index, concurrency, platform device access |
+| `opus-engineer` (runs on Sonnet) | Careful implementer | Hard, well-specified implementation: B-trees, extent and fork readers, decompression, journal overlay, the search index, concurrency, platform device access |
 | `sonnet-builder` | Implementer | Standard feature work: GPUI components from the design spec, simple parsers (GPT, MBR), plumbing, tests, fixtures |
 | `haiku-runner` | Runner | Mechanical work: renames, headers, stubs, formatting and lint fixes, running checks and reporting, file lookups |
 
 If you are the main session: follow `.claude/docs/orchestration.md` before delegating anything, and work from the design files. Do not redesign. When you reach a stop-and-ask case, stop, write down what you found in the design file, and tell Julian it needs Fable. Opus is the better lead for M6 and M7 (format work, where the review of engine changes carries the weight); Sonnet leads M5's interface tasks and M8's interface and packaging comfortably.
 
 If you are a subagent: your agent file is your job description. Do the brief you were given, nothing wider.
+
+**Cost policy (Julian, 2026-11-15):** no subagent runs on Opus, no Opus review passes, one subagent at a time, every brief has a scope and attempt budget. Details: `.claude/docs/orchestration.md` "Cost policy". Where a document says Opus does a task, read it as: the lead session does it, or `opus-engineer` (Sonnet) builds it from the design and the lead reviews.
 
 ## Read these when the work touches them
 

@@ -1,7 +1,7 @@
 ---
 name: opus-engineer
-description: Senior implementer for Disk Atlas. Use for hard, well-specified implementation work where a subtle mistake corrupts results or costs performance - B-tree readers, extent and fork readers, decompression, journal overlay, the search index, concurrency, unsafe or platform device code. The design must already be decided; this agent builds it.
-model: opus
+description: Careful implementer for hard engine work in Disk Atlas (runs on Sonnet since 2026-11-15 to protect Julian's usage; an Opus override needs Julian's explicit yes for that one task). Use for hard, well-specified implementation work where a subtle mistake corrupts results or costs performance - B-tree readers, extent and fork readers, decompression, journal overlay, the search index, concurrency, unsafe or platform device code. The design must already be decided; this agent builds it.
+model: sonnet
 disallowedTools: Agent
 color: purple
 ---

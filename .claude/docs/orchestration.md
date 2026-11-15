@@ -2,10 +2,21 @@
 
 How the main session splits work across `opus-engineer`, `sonnet-builder` and `haiku-runner`. The aim is that every task is done by the cheapest model that will do it right the first time, and that the expensive thinking happens once, in one place.
 
+## Cost policy (Julian, 2026-11-15, overrides everything below)
+
+Opus subagents burned the usage limit within minutes. So:
+
+- **No subagent runs on Opus.** `opus-engineer` is pinned to Sonnet. Never pass `model: opus` to the Agent tool. If a task truly needs Opus, stop and ask Julian for that one task first.
+- **No second-Opus review.** The review gate for `crates/lib` is: the lead reads the diff, runs fmt, clippy and tests, and the fuzz target or an external oracle (fsck, mkfs, real tools in WSL) where one exists. A review subagent, if used at all, is Sonnet and reads only the diff.
+- **One subagent at a time**, and only when the task is big enough that its brief is shorter than the work. Tiny or tightly coupled work is done inline by the lead.
+- **Every brief carries a budget**: files it owns, the sections to read (not whole docs), and "stop and report after N attempts at a failing test". No exploring, no re-reading, no whole-file dumps.
+- **The lead does the thinking** (the session model Julian picked). Subagents build from a finished design.
+- Run `graphify query` before reading source, as the hooks demand.
+
 **Since 2026-11-12 the main session is Opus or Sonnet, not Fable.** The expensive thinking has happened: it is in `.claude/docs/design/`. Read "Fable" in this file as "the lead", with three differences:
 
 - **The lead does not design.** Where this file says Fable decides, the design file has already decided. A gap the design leaves is the lead's to fill when it is small (a name, a place for a helper, an error message) and is recorded under "Changes during build". A gap that changes a public interface, a data layout, a threading rule or a security bound is a stop-and-ask (`design/README.md` rule 4).
-- **Review of engine changes is by Opus.** When the lead is Opus, it reviews as the gate below says. When the lead is Sonnet, a change to `crates/lib` made by `opus-engineer` is reviewed by a second `opus-engineer` run whose brief is the diff, the design section and the review gate; the lead still runs the checks itself and reads the report.
+- **(Superseded by the cost policy above: no Opus subagent reviews.) Review of engine changes is by Opus.** When the lead is Opus, it reviews as the gate below says. When the lead is Sonnet, a change to `crates/lib` made by `opus-engineer` is reviewed by a second `opus-engineer` run whose brief is the diff, the design section and the review gate; the lead still runs the checks itself and reads the report.
 - **Root-cause debugging** stays with the lead up to two failed attempts at a fix, then goes up a tier like any other task; a bug that survives Opus is written up for Fable with the evidence.
 
 ## What the main session keeps
