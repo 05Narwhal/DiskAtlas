@@ -234,3 +234,7 @@ What Julian tries: a System 7 floppy image (DiskCopy 4.2 and raw), a classic Mac
 ## 8. Out of scope
 
 MFS reading, per-file script switching, multi-byte scripts, the desktop database, alias resolution, bad-block sparing, the old 16-bit "sparing" of HFS floppies with tags.
+
+## 9. Changes during build
+
+- **Task 4.** `ForkMap::from_runs` takes the file id as its first argument, for the error location. `hfs::fork_map` fails with "extents overflow record missing" when a fork's runs fall short of its size and the next overflow record is absent, rather than returning a short map; this is what `hfsplus::fork_map` does, so both formats report a damaged fork the same way. Extent key order confirmed as file id, fork type, start block; the pad rule in `btree.rs` with big-keys clear is covered by `small_key_pad_rule_classic_hfs`.

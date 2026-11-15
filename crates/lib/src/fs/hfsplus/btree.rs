@@ -1386,6 +1386,58 @@ mod tests {
     }
 
     #[test]
+    fn small_key_pad_rule_classic_hfs() {
+        // Bytes written out by hand, not through a builder, so the test does
+        // not share the pad rule it checks.
+        let mut h = header(2, 1, 2, 2, 3);
+        h.attributes = 0;
+        h.max_key_length = 37;
+        // Catalog key with an empty name: keyLength 6, reserved, parentID 2,
+        // name length 0. 1 + 6 = 7 is odd: one pad byte, data at 8.
+        let odd = vec![6, 0, 0, 0, 0, 2, 0, 0xEE, 0xD1, 0xD2];
+        // Extents key: keyLength 7. 1 + 7 = 8 is even: data at 8.
+        let even = vec![7, 0xFF, 0, 0, 0, 20, 0, 3, 0xD3, 0xD4];
+        // Index record of a tree without variable index keys: keyLength 6
+        // but the key occupies max_key_length (37) bytes; 1 + 37 = 38 is
+        // even, so the child node number is at 38.
+        let mut index = vec![0u8; 42];
+        index[..7].copy_from_slice(&[6, 0, 0, 0, 0, 1, 0]);
+        index[38..42].copy_from_slice(&2u32.to_be_bytes());
+        // Fill the unused key bytes so a wrong split would show.
+        for b in &mut index[7..38] {
+            *b = 0xAA;
+        }
+        let t = tree(&[
+            header_node(&h),
+            node(SIZE, INDEX, 2, 0, 0, &[index]),
+            node(SIZE, LEAF, 1, 0, 0, &[odd, even]),
+        ])
+        .unwrap();
+
+        let leaf = t.read_node(2).unwrap();
+        let r = leaf.record(0).unwrap();
+        assert_eq!(r.key, &[0u8, 0, 0, 0, 2, 0][..]);
+        assert_eq!(r.data, &[0xD1u8, 0xD2][..]);
+        let r = leaf.record(1).unwrap();
+        assert_eq!(r.key, &[0xFFu8, 0, 0, 0, 20, 0, 3][..]);
+        assert_eq!(r.data, &[0xD3u8, 0xD4][..]);
+
+        let index = t.read_node(1).unwrap();
+        let r = index.record(0).unwrap();
+        assert_eq!(r.key, &[0u8, 0, 0, 0, 1, 0][..]);
+        assert_eq!(r.data, &2u32.to_be_bytes()[..]);
+
+        // The seek follows that child pointer to the leaf.
+        let mut cmp = |_: &[u8]| Ok(Ordering::Less);
+        let mut c = t.seek(&mut cmp).unwrap();
+        assert_eq!(c.next_record().unwrap(), None);
+        let mut cmp = |key: &[u8]| Ok(key.cmp(&[0u8, 0, 0, 0, 2, 0][..]));
+        let mut c = t.seek(&mut cmp).unwrap();
+        assert_eq!(c.next_record().unwrap().unwrap().data, &[0xD1u8, 0xD2][..]);
+        assert_eq!(c.position(), Some((2, 0)));
+    }
+
+    #[test]
     fn seek_one_leaf() {
         let t = one_leaf();
         assert_eq!(seek_key(&t, 5), Some(10));
