@@ -35,9 +35,9 @@ use crate::fs::hfsplus::catalog::entry_flags;
 use crate::fs::hfsplus::compression::{self as decmpfs, DecmpfsHeader, MAX_DECMPFS_XATTR};
 use crate::fs::hfsplus::unicode::decompose;
 use crate::fs::{
-    DirBatch, DirEntry, DirProgress, DirStream, EntryFlags, Extent, FileSystem, FinderCodes,
-    Metadata, NodeId, NodeKind, Owner, ScanEntry, ScanSummary, Stream, Timestamp, VolumeIdentity,
-    VolumeInfo, XattrInfo,
+    AllocationMap, DirBatch, DirEntry, DirProgress, DirStream, EntryFlags, Extent, FileSystem,
+    FinderCodes, Metadata, NodeId, NodeKind, Owner, ScanEntry, ScanSummary, Stream, Timestamp,
+    VolumeIdentity, VolumeInfo, XattrInfo,
 };
 use crate::io::block::{BlockSource, MemSource, check_range};
 
@@ -198,6 +198,7 @@ pub(crate) fn check_features(sb: &ApfsSuperblock) -> Result<()> {
 
 /// Everything a volume's operations share; behind an `Arc` so folder
 /// streams own it.
+#[allow(dead_code, reason = "sb, omap and xid serve snapshots, M7 task 9")]
 pub(crate) struct Core {
     pub container: Arc<Container>,
     pub blocks: Arc<Blocks>,
@@ -265,6 +266,11 @@ impl Volume {
         let mut info = VolumeInfo::new(sb.name.clone());
         info.format = Some("APFS");
         info.total_bytes = Some(container.byte_len());
+        // The space manager is read once here; a damaged one only loses this.
+        info.free_bytes = super::spaceman::read(&container).ok().map(|s| {
+            s.free_count
+                .saturating_mul(u64::from(container.blocks.block_size))
+        });
         info.resource_forks = true;
 
         let mut change = [0u8; 16];
@@ -428,14 +434,12 @@ impl Facts {
     }
 }
 
+/// What [`visit`] calls per record: (type, key, value).
+type RecordVisitor<'a> = dyn FnMut(u8, &[u8], &[u8]) -> Result<ControlFlow<()>> + 'a;
+
 /// Calls `f` with every record of object `id` from type `from` on, in key
 /// order, until `f` breaks or the object's records end.
-fn visit(
-    cursor: &mut Cursor,
-    id: u64,
-    from: u8,
-    f: &mut dyn FnMut(u8, &[u8], &[u8]) -> Result<ControlFlow<()>>,
-) -> Result<()> {
+fn visit(cursor: &mut Cursor, id: u64, from: u8, f: &mut RecordVisitor<'_>) -> Result<()> {
     cursor.seek(&mut first_of(id, from))?;
     while let Some((key, value)) = cursor.next()? {
         let (kid, kind) = key_header(key).ok_or_else(|| bad_record(id, "key is too short"))?;
@@ -526,14 +530,14 @@ impl Core {
             }
             let e = FileExtent::parse(key, value)
                 .ok_or_else(|| bad_record(id, "file extent record is too short"))?;
-            if e.len == 0 || e.len % bs != 0 || e.logical < end {
+            if e.len == 0 || e.len.checked_rem(bs) != Some(0) || e.logical < end {
                 return Err(bad_record(id, "file extent length or order is invalid"));
             }
             let zeros = e.paddr == 0 || e.flags & FEXT_PREALLOCATED != 0;
             if !zeros {
                 let inside = e
                     .paddr
-                    .checked_add(e.len / bs)
+                    .checked_add(e.len.checked_div(bs).unwrap_or(0))
                     .is_some_and(|last| last <= self.blocks.block_count);
                 if !inside {
                     return Err(corrupt(
@@ -997,6 +1001,10 @@ impl FileSystem for Volume {
         found
             .map(|value| self.core.read_xvalue(&value, max))
             .transpose()
+    }
+
+    fn allocation_map(&self, buckets: usize) -> Result<AllocationMap> {
+        super::spaceman::allocation_map(&self.core.container, buckets)
     }
 
     fn scan(&self, visit: &mut dyn FnMut(ScanEntry<'_>) -> ControlFlow<()>) -> Result<ScanSummary> {

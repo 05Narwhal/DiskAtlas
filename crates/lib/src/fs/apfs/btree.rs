@@ -605,8 +605,6 @@ pub(crate) struct Tree {
     layout: Layout,
     subtype: u16,
     structure: &'static str,
-    /// The root's tree info.
-    pub info: TreeInfo,
     /// Most node loads one iteration may make.
     node_limit: u64,
 }
@@ -691,7 +689,6 @@ impl Tree {
             layout: spec.layout,
             subtype: spec.subtype,
             structure: spec.structure,
-            info,
             node_limit: info.node_count.min(blocks.block_count).saturating_add(1),
         })
     }

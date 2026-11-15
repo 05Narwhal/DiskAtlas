@@ -25,13 +25,13 @@ pub(crate) const HEADER_LEN: usize = 32;
 /// Low 16 bits of `o_type`: the object's type.
 pub(crate) const TYPE_MASK: u32 = 0x0000_FFFF;
 /// Storage flag: the object lives in the checkpoint data area.
+#[cfg_attr(not(test), allow(dead_code, reason = "named for the test builder"))]
 pub(crate) const OBJ_EPHEMERAL: u32 = 0x8000_0000;
 /// Storage flag: the object id is the block address.
+#[cfg_attr(not(test), allow(dead_code, reason = "named for the test builder"))]
 pub(crate) const OBJ_PHYSICAL: u32 = 0x4000_0000;
 /// Storage flag: the object is stored without a header (§3.5).
 pub(crate) const OBJ_NOHEADER: u32 = 0x2000_0000;
-/// Storage flag: the object is encrypted.
-pub(crate) const OBJ_ENCRYPTED: u32 = 0x1000_0000;
 
 /// Container superblock.
 pub(crate) const TYPE_NX_SUPERBLOCK: u16 = 0x1;
@@ -54,10 +54,12 @@ pub(crate) const TYPE_FS: u16 = 0xD;
 /// File-system tree (a B-tree subtype).
 pub(crate) const TYPE_FSTREE: u16 = 0xE;
 /// Snapshot metadata tree (a B-tree subtype).
+#[allow(dead_code, reason = "snapshots, M7 task 9")]
 pub(crate) const TYPE_SNAPMETATREE: u16 = 0x10;
 /// Object map tree (a B-tree subtype).
 pub(crate) const TYPE_OMAP_TREE: u16 = 0xB;
 /// Sealed-volume file-extent tree (a B-tree subtype).
+#[allow(dead_code, reason = "sealed volumes, M7 task 9")]
 pub(crate) const TYPE_FEXT_TREE: u16 = 0x1F;
 
 /// `2^32 - 1`, the Fletcher-64 modulus.

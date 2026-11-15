@@ -29,10 +29,10 @@ pub(crate) const OBJ_ID_MASK: u64 = 0x0FFF_FFFF_FFFF_FFFF;
 const TYPE_SHIFT: u32 = 60;
 
 /// Record types.
+#[allow(dead_code, reason = "snapshots, M7 task 9")]
 pub(crate) const T_SNAP_METADATA: u8 = 1;
 pub(crate) const T_INODE: u8 = 3;
 pub(crate) const T_XATTR: u8 = 4;
-pub(crate) const T_SIBLING_LINK: u8 = 5;
 pub(crate) const T_FILE_EXTENT: u8 = 8;
 pub(crate) const T_DIR_REC: u8 = 9;
 
@@ -91,6 +91,7 @@ pub(crate) fn first_of(id: u64, kind: u8) -> impl FnMut(&[u8]) -> Result<Orderin
 }
 
 /// Orders a file-extent key against (object `id`, logical address `at`).
+#[allow(dead_code, reason = "sealed volumes, M7 task 9")]
 pub(crate) fn extent_at(id: u64, at: u64) -> impl FnMut(&[u8]) -> Result<Ordering> {
     move |key: &[u8]| {
         let (kid, ktype) = key_header(key).ok_or_else(short_key)?;
@@ -332,6 +333,7 @@ impl FileExtent {
 
     /// From a sealed volume's file-extent tree record: key (private id,
     /// logical address), value (length and flags, physical block).
+    #[allow(dead_code, reason = "sealed volumes, M7 task 9")]
     pub fn parse_sealed(key: &[u8], value: &[u8]) -> Option<(u64, Self)> {
         let len_and_flags = le_u64(value, 0)?;
         Some((
@@ -495,12 +497,6 @@ pub(crate) mod encode {
         v.extend_from_slice(&paddr.to_le_bytes());
         v.extend_from_slice(&paddr.to_le_bytes());
         v
-    }
-
-    pub fn sibling_key(id: u64, sibling: u64) -> Vec<u8> {
-        let mut k = key(id, T_SIBLING_LINK);
-        k.extend_from_slice(&sibling.to_le_bytes());
-        k
     }
 }
 

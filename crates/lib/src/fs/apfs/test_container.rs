@@ -22,7 +22,8 @@ use super::btree::{INFO_LEN, Layout};
 use super::container::Blocks;
 use super::object::{
     OBJ_EPHEMERAL, OBJ_PHYSICAL, TYPE_BTREE, TYPE_BTREE_NODE, TYPE_CHECKPOINT_MAP, TYPE_FS,
-    TYPE_FSTREE, TYPE_NX_SUPERBLOCK, TYPE_OMAP, TYPE_OMAP_TREE, TYPE_SPACEMAN, seal,
+    TYPE_FSTREE, TYPE_NX_SUPERBLOCK, TYPE_OMAP, TYPE_OMAP_TREE, TYPE_SPACEMAN, TYPE_SPACEMAN_CIB,
+    seal,
 };
 use crate::io::block::MemSource;
 
@@ -719,16 +720,22 @@ pub(crate) struct BuiltContainer {
     /// Where each volume superblock is.
     pub volume_paddrs: Vec<u64>,
     pub spaceman_oid: u64,
+    pub spaceman_paddr: u64,
     /// The ring superblock and map of each requested checkpoint, in order.
     pub checkpoint_superblocks: Vec<u64>,
     pub checkpoint_maps: Vec<u64>,
 }
+
+/// Blocks per space manager chunk in built containers (real ones use
+/// 32,768); small, so a small image has several chunks.
+const BLOCKS_PER_CHUNK: u64 = 8;
 
 /// Builds a container.
 pub(crate) struct ContainerBuilder {
     checkpoints: Vec<u64>,
     block_zero_xid: Option<u64>,
     volumes: Vec<VolumeSpec>,
+    free_blocks: u64,
 }
 
 impl ContainerBuilder {
@@ -738,7 +745,14 @@ impl ContainerBuilder {
             checkpoints: vec![10],
             block_zero_xid: None,
             volumes: vec![VolumeSpec::new("Atlas")],
+            free_blocks: 0,
         }
+    }
+
+    /// Blank, free blocks at the end of the container.
+    pub fn free_blocks(mut self, n: u64) -> Self {
+        self.free_blocks = n;
+        self
     }
 
     /// Checkpoints at these transactions, in ring order.
@@ -780,17 +794,6 @@ impl ContainerBuilder {
             img.alloc();
         }
         let spaceman_paddr = data_base;
-        let mut sm = vec![0u8; BS];
-        header(
-            &mut sm,
-            SPACEMAN_OID,
-            MAP_XID,
-            OBJ_EPHEMERAL | u32::from(TYPE_SPACEMAN),
-            0,
-        );
-        put_u32(&mut sm, 32, BS as u32);
-        seal(&mut sm);
-        img.put(spaceman_paddr, sm);
 
         // Volumes, then the container object map that finds them.
         let mut next_oid = FIRST_VIRTUAL_OID;
@@ -807,9 +810,59 @@ impl ContainerBuilder {
         }
         let omap = write_omap(&mut img, &nx_map, 16);
 
+        // The space manager: one chunk-info block over chunks of
+        // BLOCKS_PER_CHUNK; every block written so far is used, the blank
+        // tail is free.
+        let cib = img.alloc();
+        let used = img.blocks.len() as u64;
+        for _ in 0..self.free_blocks {
+            img.alloc();
+        }
+        let block_count = img.blocks.len() as u64;
+        let chunks = block_count.div_ceil(BLOCKS_PER_CHUNK);
+        let mut b = vec![0u8; BS];
+        header(
+            &mut b,
+            cib,
+            MAP_XID,
+            OBJ_PHYSICAL | u32::from(TYPE_SPACEMAN_CIB),
+            0,
+        );
+        put_u32(&mut b, 36, chunks as u32);
+        for c in 0..chunks {
+            let first = c * BLOCKS_PER_CHUNK;
+            let n = BLOCKS_PER_CHUNK.min(block_count - first);
+            let free = (first + n).saturating_sub(used.max(first));
+            let at = 40 + 32 * c as usize;
+            put_u64(&mut b, at, MAP_XID);
+            put_u64(&mut b, at + 8, first);
+            put_u32(&mut b, at + 16, n as u32);
+            put_u32(&mut b, at + 20, free as u32);
+        }
+        seal(&mut b);
+        img.put(cib, b);
+        let mut sm = vec![0u8; BS];
+        header(
+            &mut sm,
+            SPACEMAN_OID,
+            MAP_XID,
+            OBJ_EPHEMERAL | u32::from(TYPE_SPACEMAN),
+            0,
+        );
+        put_u32(&mut sm, 32, BS as u32);
+        put_u32(&mut sm, 36, BLOCKS_PER_CHUNK as u32);
+        put_u32(&mut sm, 40, 126);
+        put_u64(&mut sm, 48, block_count);
+        put_u64(&mut sm, 56, chunks);
+        put_u32(&mut sm, 64, 1);
+        put_u64(&mut sm, 72, self.free_blocks);
+        put_u32(&mut sm, 80, 2048);
+        put_u64(&mut sm, 2048, cib);
+        seal(&mut sm);
+        img.put(spaceman_paddr, sm);
+
         // The ring: checkpoint k at slots 2k (map) and 2k+1 (superblock);
         // a stale block 0's map last, with no superblock.
-        let block_count = img.blocks.len() as u64;
         let nx = |xid: u64, index: u32| {
             let mut b = vec![0u8; BS];
             header(
@@ -888,6 +941,7 @@ impl ContainerBuilder {
             xid: self.checkpoints.iter().copied().max().unwrap_or(zero_xid),
             volume_paddrs,
             spaceman_oid: SPACEMAN_OID,
+            spaceman_paddr,
             checkpoint_superblocks,
             checkpoint_maps,
         }

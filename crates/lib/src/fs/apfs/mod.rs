@@ -33,6 +33,7 @@ mod fuzz_seeds;
 pub(crate) mod object;
 pub(crate) mod omap;
 pub(crate) mod records;
+pub(crate) mod spaceman;
 #[cfg(test)]
 pub(crate) mod test_container;
 pub mod volume;
