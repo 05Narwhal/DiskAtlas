@@ -19,8 +19,11 @@
 //! newest valid checkpoint, the container object map and a shared node
 //! cache. Each volume holds the container behind an `Arc`.
 
-// Allowed until `mount` uses these (task 7).
-#![allow(dead_code)]
+use std::sync::Arc;
+
+use crate::error::{CorruptKind, Corruption, Error, Location, Result};
+use crate::fs::probe::{ContainerVolume, VolumeRole, VolumeState};
+use crate::io::block::BlockSource;
 
 pub(crate) mod btree;
 pub(crate) mod bytes;
@@ -29,8 +32,82 @@ pub(crate) mod container;
 mod fuzz_seeds;
 pub(crate) mod object;
 pub(crate) mod omap;
+pub(crate) mod records;
 #[cfg(test)]
 pub(crate) mod test_container;
+pub mod volume;
+
+pub use volume::Volume;
+
+use container::Container;
+use object::TYPE_FS;
+use volume::ApfsSuperblock;
+
+/// Opens the APFS container in `source` and every volume in it, in the
+/// container's slot order.
+///
+/// Fails only when the container itself cannot be opened; a volume that
+/// cannot be read is returned as [`VolumeState::Failed`] beside the others.
+pub fn mount(source: Arc<dyn BlockSource>) -> Result<Vec<ContainerVolume>> {
+    let container = Container::open(source)?;
+    Ok(container
+        .superblock
+        .fs_oids
+        .iter()
+        .map(|&oid| open_slot(&container, oid))
+        .collect())
+}
+
+/// The volume superblock named by the virtual oid `oid`, as of the
+/// container's checkpoint.
+fn read_superblock(container: &Container, oid: u64) -> Result<ApfsSuperblock> {
+    let mapping = container
+        .omap
+        .lookup(&container.blocks, oid, container.xid())?
+        .ok_or_else(|| {
+            Error::Corrupt(Corruption::new(
+                "container object map",
+                Location::Object(oid),
+                CorruptKind::Other("volume is not in the container's object map"),
+            ))
+        })?;
+    let block = container.blocks.block(mapping.paddr)?;
+    let header = object::verify(
+        &block,
+        mapping.paddr,
+        "volume superblock",
+        &[TYPE_FS],
+        Some(oid),
+    )?;
+    ApfsSuperblock::parse(&block, mapping.paddr, header.xid)
+}
+
+fn open_slot(container: &Arc<Container>, oid: u64) -> ContainerVolume {
+    let sb = match read_superblock(container, oid) {
+        Ok(sb) => sb,
+        Err(e) => return ContainerVolume::new("", None, VolumeState::Failed(e)),
+    };
+    let name = sb.name.clone();
+    let role = role_of(sb.role);
+    let state = match Volume::open(Arc::clone(container), sb, container.xid()) {
+        Ok(volume) => VolumeState::Ready(Arc::new(volume)),
+        Err(e) => VolumeState::Failed(e),
+    };
+    ContainerVolume::new(name, role, state)
+}
+
+/// The sidebar role of `apfs_role` (§7): user and data are both Data; a
+/// role without a variant is `None`.
+fn role_of(role: u16) -> Option<VolumeRole> {
+    match role {
+        0x1 => Some(VolumeRole::System),
+        0x2 | 0x40 => Some(VolumeRole::Data),
+        0x4 => Some(VolumeRole::Recovery),
+        0x8 => Some(VolumeRole::Vm),
+        0x10 => Some(VolumeRole::Preboot),
+        _ => None,
+    }
+}
 
 /// Entry points for the fuzz targets in `fuzz/`. Not an API: they exist so
 /// the targets can reach parsers that are private to the engine.

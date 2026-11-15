@@ -143,16 +143,6 @@ pub(crate) fn write_tree(
 ) -> WrittenTree {
     assert!(opts.per_node >= 2);
     let mut mappings = Vec::new();
-    let node_count = {
-        // Count nodes first, for the tree info.
-        let mut n = records.len().div_ceil(opts.per_node).max(1);
-        let mut total = n;
-        while n > 1 {
-            n = n.div_ceil(opts.per_node);
-            total += n;
-        }
-        total as u64
-    };
     let longest_key = records.iter().map(|r| r.0.len()).max().unwrap_or(0) as u32;
     let longest_value = records.iter().map(|r| r.1.len()).max().unwrap_or(0) as u32;
 
@@ -160,16 +150,15 @@ pub(crate) fn write_tree(
     let mut level: Vec<(Vec<u8>, Records)> = if records.is_empty() {
         vec![(Vec::new(), Vec::new())]
     } else {
-        records
-            .chunks(opts.per_node)
-            .map(|c| (c[0].0.clone(), c.to_vec()))
-            .collect()
+        pack(records.to_vec(), opts)
     };
     let mut depth: u16 = 0;
+    let mut written = 0u64;
     loop {
         let is_root = level.len() == 1;
         let mut ids = Vec::new();
         for (first, entries) in &level {
+            written += 1;
             let paddr = img.alloc();
             let oid = if opts.physical {
                 paddr
@@ -182,7 +171,7 @@ pub(crate) fn write_tree(
             let info = is_root.then_some(RootInfo {
                 physical: opts.physical,
                 key_count: records.len() as u64,
-                node_count,
+                node_count: written,
                 longest_key,
                 longest_value,
             });
@@ -198,18 +187,41 @@ pub(crate) fn write_tree(
                 mappings,
             };
         }
-        level = ids
-            .chunks(opts.per_node)
-            .map(|c| {
-                let entries = c
-                    .iter()
-                    .map(|(k, oid, _)| (k.clone(), oid.to_le_bytes().to_vec()))
-                    .collect();
-                (c[0].0.clone(), entries)
-            })
-            .collect();
+        level = pack(
+            ids.iter()
+                .map(|(k, oid, _)| (k.clone(), oid.to_le_bytes().to_vec()))
+                .collect(),
+            opts,
+        );
         depth += 1;
     }
+}
+
+/// Groups entries into nodes of at most `per_node` entries that fit a block
+/// (with room for the tree info, so any node could be the root).
+fn pack(entries: Records, opts: NodeOpts) -> Vec<(Vec<u8>, Records)> {
+    let entry_size = if matches!(opts.layout, Layout::Fixed { .. }) {
+        4
+    } else {
+        8
+    };
+    let room = BS - 56 - INFO_LEN;
+    let mut groups = Vec::new();
+    let mut current: Records = Vec::new();
+    let mut used = 0;
+    for e in entries {
+        let need = e.0.len() + e.1.len() + entry_size;
+        if !current.is_empty() && (current.len() == opts.per_node || used + need > room) {
+            groups.push((current[0].0.clone(), std::mem::take(&mut current)));
+            used = 0;
+        }
+        used += need;
+        current.push(e);
+    }
+    if !current.is_empty() {
+        groups.push((current[0].0.clone(), current));
+    }
+    groups
 }
 
 struct RootInfo {
@@ -355,6 +367,257 @@ pub(crate) fn write_omap(
     paddr
 }
 
+/// What an item of a built volume is.
+#[derive(Clone)]
+pub(crate) enum ItemKind {
+    Folder,
+    /// A regular file with this content, stored in `fragments` runs.
+    File(Vec<u8>),
+    Symlink(String),
+    /// A decmpfs file: the whole `com.apple.decmpfs` value and, for the
+    /// resource fork kinds, the fork.
+    Compressed {
+        decmpfs: Vec<u8>,
+        resource: Option<Vec<u8>>,
+    },
+}
+
+/// One item of a built volume.
+#[derive(Clone)]
+pub(crate) struct FsItem {
+    pub id: u64,
+    pub parent: u64,
+    pub name: String,
+    pub kind: ItemKind,
+    pub bsd_flags: u32,
+    pub internal_flags: u64,
+    pub uncompressed_size: u64,
+    /// Runs a file's content is split into (at least 1).
+    pub fragments: usize,
+    /// (name, value, stored as a stream).
+    pub xattrs: Vec<(String, Vec<u8>, bool)>,
+    /// Size recorded in the data stream when it differs from the content
+    /// (a sparse or truncated file).
+    pub size_override: Option<u64>,
+}
+
+/// The files and folders of a built volume. The root (2) exists already.
+#[derive(Clone)]
+pub(crate) struct FsSpec {
+    pub items: Vec<FsItem>,
+    next_id: u64,
+}
+
+/// Fixed dates of every built inode: created, modified, changed, accessed.
+pub(crate) const TIMES: [u64; 4] = [
+    1_600_000_000_000_000_000,
+    1_650_000_000_000_000_000,
+    1_660_000_000_000_000_000,
+    1_670_000_000_000_000_000,
+];
+
+impl FsSpec {
+    pub fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            next_id: 16,
+        }
+    }
+
+    fn add(&mut self, parent: u64, name: &str, kind: ItemKind) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.items.push(FsItem {
+            id,
+            parent,
+            name: name.to_owned(),
+            kind,
+            bsd_flags: 0,
+            internal_flags: 0,
+            uncompressed_size: 0,
+            fragments: 1,
+            xattrs: Vec::new(),
+            size_override: None,
+        });
+        id
+    }
+
+    pub fn folder(&mut self, parent: u64, name: &str) -> u64 {
+        self.add(parent, name, ItemKind::Folder)
+    }
+
+    pub fn file(&mut self, parent: u64, name: &str, content: &[u8]) -> u64 {
+        self.add(parent, name, ItemKind::File(content.to_vec()))
+    }
+
+    pub fn symlink(&mut self, parent: u64, name: &str, target: &str) -> u64 {
+        self.add(parent, name, ItemKind::Symlink(target.to_owned()))
+    }
+
+    pub fn compressed(
+        &mut self,
+        parent: u64,
+        name: &str,
+        decmpfs: Vec<u8>,
+        resource: Option<Vec<u8>>,
+    ) -> u64 {
+        let id = self.add(parent, name, ItemKind::Compressed { decmpfs, resource });
+        self.item(id).bsd_flags |= super::records::UF_COMPRESSED;
+        id
+    }
+
+    pub fn xattr(&mut self, id: u64, name: &str, value: &[u8], stream: bool) {
+        self.item(id)
+            .xattrs
+            .push((name.to_owned(), value.to_vec(), stream));
+    }
+
+    pub fn item(&mut self, id: u64) -> &mut FsItem {
+        self.items.iter_mut().find(|i| i.id == id).expect("item")
+    }
+
+    /// The records of the volume, sorted, with content written into `img`.
+    pub fn records(&self, img: &mut Image, hashed: bool) -> Records {
+        use super::records::encode::*;
+        use super::records::{DT_DIR, DT_LNK, DT_REG};
+        let mut records: Records = Vec::new();
+        let mut next_stream_id = 0x0100_0000u64;
+        let children = |id: u64| self.items.iter().filter(|i| i.parent == id).count() as u32;
+        records.push((
+            inode_key(2),
+            inode_value(&InodeSpec {
+                parent: 1,
+                private_id: 2,
+                mode: 0o040755,
+                bsd_flags: 0,
+                internal_flags: 0,
+                uncompressed_size: 0,
+                name: Some("root".into()),
+                size: None,
+                times: TIMES,
+                nchildren: children(2),
+            }),
+        ));
+        for item in &self.items {
+            let (mode, dt, size) = match &item.kind {
+                ItemKind::Folder => (0o040755, DT_DIR, None),
+                ItemKind::File(c) => (
+                    0o100644,
+                    DT_REG,
+                    Some(item.size_override.unwrap_or(c.len() as u64)),
+                ),
+                ItemKind::Symlink(t) => (0o120755, DT_LNK, Some(t.len() as u64)),
+                ItemKind::Compressed { .. } => (0o100644, DT_REG, None),
+            };
+            records.push((
+                inode_key(item.id),
+                inode_value(&InodeSpec {
+                    parent: item.parent,
+                    private_id: item.id,
+                    mode,
+                    bsd_flags: item.bsd_flags,
+                    internal_flags: item.internal_flags,
+                    uncompressed_size: item.uncompressed_size,
+                    name: Some(item.name.clone()),
+                    size,
+                    times: TIMES,
+                    nchildren: if dt == DT_DIR { children(item.id) } else { 1 },
+                }),
+            ));
+            records.push((
+                drec_key(item.parent, &item.name, hashed),
+                drec_value(item.id, dt),
+            ));
+            let mut xattrs = item.xattrs.clone();
+            match &item.kind {
+                ItemKind::File(content) => {
+                    records.extend(write_content(img, item.id, content, item.fragments));
+                }
+                ItemKind::Symlink(target) => {
+                    let mut t = target.as_bytes().to_vec();
+                    t.push(0);
+                    xattrs.push(("com.apple.fs.symlink".into(), t, false));
+                }
+                ItemKind::Compressed { decmpfs, resource } => {
+                    xattrs.push(("com.apple.decmpfs".into(), decmpfs.clone(), false));
+                    if let Some(fork) = resource {
+                        xattrs.push(("com.apple.ResourceFork".into(), fork.clone(), true));
+                    }
+                }
+                ItemKind::Folder => {}
+            }
+            for (name, value, stream) in xattrs {
+                if stream {
+                    let sid = next_stream_id;
+                    next_stream_id += 1;
+                    records.extend(write_content(img, sid, &value, 1));
+                    records.push((
+                        xattr_key(item.id, &name),
+                        xattr_stream(sid, value.len() as u64),
+                    ));
+                } else {
+                    records.push((xattr_key(item.id, &name), xattr_embedded(&value)));
+                }
+            }
+        }
+        records.sort_by_key(|(k, _)| order(k, hashed));
+        records
+    }
+}
+
+/// Writes `content` into new blocks in `fragments` runs (a spare block
+/// between runs keeps them apart); returns the file extent records.
+fn write_content(img: &mut Image, id: u64, content: &[u8], fragments: usize) -> Records {
+    use super::records::encode::{extent_key, extent_value};
+    let blocks = content.len().div_ceil(BS);
+    if blocks == 0 {
+        return Vec::new();
+    }
+    let per = blocks.div_ceil(fragments.max(1));
+    let mut out = Vec::new();
+    for (i, piece) in content.chunks(per * BS).enumerate() {
+        if i > 0 {
+            img.alloc();
+        }
+        let n = piece.len().div_ceil(BS);
+        let first = img.alloc();
+        for _ in 1..n {
+            img.alloc();
+        }
+        for (j, chunk) in piece.chunks(BS).enumerate() {
+            let mut b = vec![0u8; BS];
+            b[..chunk.len()].copy_from_slice(chunk);
+            img.put(first + j as u64, b);
+        }
+        out.push((
+            extent_key(id, (i * per * BS) as u64),
+            extent_value((n * BS) as u64, 0, first),
+        ));
+    }
+    out
+}
+
+/// The order of file-system keys (§3.7, as verified): object id, type, then
+/// the hash bits and name, the name, or the logical address.
+fn order(key: &[u8], hashed: bool) -> (u64, u8, Vec<u8>) {
+    use super::records::{T_DIR_REC, T_FILE_EXTENT, T_XATTR, key_header};
+    let (id, kind) = key_header(key).expect("key");
+    let rest = match kind {
+        T_DIR_REC if hashed => {
+            let v = u32::from_le_bytes(key[8..12].try_into().unwrap());
+            let mut r = (v & !0x3FF).to_be_bytes().to_vec();
+            r.extend_from_slice(&key[12..]);
+            r
+        }
+        T_DIR_REC | T_XATTR => key[10..].to_vec(),
+        T_FILE_EXTENT => u64::from_le_bytes(key[8..16].try_into().unwrap())
+            .to_be_bytes()
+            .to_vec(),
+        _ => key.get(8..).unwrap_or(&[]).to_vec(),
+    };
+    (id, kind, rest)
+}
+
 /// Flips one byte in the middle of block `paddr`.
 pub(crate) fn corrupt_block(image: &mut [u8], paddr: u64, block_size: usize) {
     let at = paddr as usize * block_size + block_size / 2;
@@ -418,25 +681,33 @@ pub(crate) struct VolumeSpec {
     pub incompatible: u64,
     /// `apfs_fs_flags` (0x1 unencrypted).
     pub fs_flags: u64,
-    /// File-system tree records, sorted.
-    pub records: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The files and folders.
+    pub fs: FsSpec,
+    /// Raw sorted records used instead of `fs`, for damage tests.
+    pub records: Option<Records>,
     /// Records per file-system tree node.
     pub per_node: usize,
     pub uuid: [u8; 16],
 }
 
 impl VolumeSpec {
-    /// An unencrypted, case-sensitive volume with no records.
+    /// An unencrypted, case-sensitive volume with an empty root folder.
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_owned(),
             role: 0,
             incompatible: 0,
             fs_flags: 1,
-            records: Vec::new(),
+            fs: FsSpec::new(),
+            records: None,
             per_node: 16,
             uuid: [0x11; 16],
         }
+    }
+
+    /// Hashed directory keys: case- or normalization-insensitive.
+    pub fn hashed(&self) -> bool {
+        self.incompatible & 0x9 != 0
     }
 }
 
@@ -632,12 +903,11 @@ fn write_volume(
     oid: u64,
     next_oid: &mut u64,
 ) -> u64 {
-    let tree = write_tree(
-        img,
-        &spec.records,
-        NodeOpts::fs_tree(spec.per_node),
-        next_oid,
-    );
+    let records = match &spec.records {
+        Some(r) => r.clone(),
+        None => spec.fs.records(img, spec.hashed()),
+    };
+    let tree = write_tree(img, &records, NodeOpts::fs_tree(spec.per_node), next_oid);
     let entries: Vec<_> = tree
         .mappings
         .iter()
