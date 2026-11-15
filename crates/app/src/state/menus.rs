@@ -72,7 +72,7 @@ pub const BUILT: Built = Built {
     layout_mode: true,
     pins: false,
     open_copy: false,
-    trash_rows: false,
+    trash_rows: true,
     show_original: false,
     visibility_toggles: true,
     copy_to_computer: true,

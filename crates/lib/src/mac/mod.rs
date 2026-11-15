@@ -21,6 +21,7 @@ pub mod bplist;
 pub mod bundle;
 pub mod conventions;
 pub mod sidecar_fs;
+pub mod trash;
 pub mod xattr;
 pub(crate) mod util;
 
