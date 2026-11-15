@@ -124,3 +124,10 @@ path = "fuzz_targets/appledouble.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bplist"
+path = "fuzz_targets/bplist.rs"
+test = false
+doc = false
+bench = false
