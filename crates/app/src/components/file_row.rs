@@ -23,6 +23,7 @@ use std::ops::Range;
 
 use disk_atlas_lib::fs::NodeKind;
 use disk_atlas_lib::mac::SystemItem;
+use disk_atlas_lib::mac::bundle;
 use disk_atlas_lib::search::kind::classify_entry;
 use gpui::{
     App, Div, ElementId, FontWeight, HighlightStyle, Hsla, IntoElement, MouseButton,
@@ -32,7 +33,9 @@ use gpui::{
 use crate::components::sidebar::tooltip;
 use crate::format;
 use crate::state::listing::Row;
+use crate::state::settings::Settings;
 use crate::state::sizes::{LOWER_BOUND_TIP, SizeState, size_text};
+use crate::theme::colors::label_colour;
 use crate::theme::{
     Glyph, Theme, metrics,
     scale::{Density, radius},
@@ -216,6 +219,10 @@ pub struct FileRow {
     resource: Option<Option<SharedString>>,
     kind: &'static str,
     glyph: Glyph,
+    /// The entry is a package: drawn as one item unless `packages_as_folders` is on.
+    package: Option<&'static str>,
+    /// The Finder label, 0 to 7.
+    label: u8,
     link: bool,
     selected: bool,
     cursor: bool,
@@ -263,6 +270,9 @@ impl FileRow {
             }),
             kind: format::kind(entry.name, entry.kind),
             glyph: Glyph::from_class(classify_entry(entry.name, browsable, None)),
+            package: bundle::is_package(entry.name, entry.kind, entry.flags)
+                .then(|| bundle::package_kind(entry.name)),
+            label: entry.flags.label(),
             link: entry.kind == NodeKind::Symlink,
             selected: row.selected,
             cursor: row.cursor,
@@ -332,8 +342,29 @@ impl FileRow {
 }
 
 impl RenderOnce for FileRow {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = Theme::get(cx).colors;
+        let settings = cx.try_global::<Settings>();
+        let as_folders = settings.is_some_and(|s| s.bool_of("packages_as_folders"));
+        let label_dots = settings.is_none_or(|s| s.bool_of("label_dots"));
+        if let Some(kind) = self.package
+            && !as_folders
+        {
+            self.glyph = Glyph::Application;
+            self.kind = kind;
+        }
+        let label_dot = label_dots
+            .then(|| label_colour(self.label))
+            .flatten()
+            .map(|colour| {
+                div()
+                    .flex_none()
+                    .size(metrics::LABEL_DOT)
+                    .rounded_full()
+                    .bg(colour)
+                    .border_1()
+                    .border_color(colors.line)
+            });
         let size_id = self.name.clone();
         let (name_color, other_color, icon_color): (Hsla, Hsla, Hsla) = if self.selected {
             (colors.on_mark, colors.on_mark, colors.on_mark)
@@ -402,6 +433,7 @@ impl RenderOnce for FileRow {
                                     .text_color(icon_color),
                             ),
                     )
+                    .children(label_dot)
                     .child(name),
             )
             .children(

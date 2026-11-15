@@ -385,6 +385,17 @@ impl ResolvedIds {
     }
 }
 
+/// True unless `packages_as_folders` is on: packages are one item.
+fn packages_on(cx: &App) -> bool {
+    cx.try_global::<crate::state::settings::Settings>()
+        .is_none_or(|settings| !settings.bool_of("packages_as_folders"))
+}
+
+/// True when the entry is a package (a folder with a package's extension or the bundle bit).
+fn is_package_entry(entry: &disk_atlas_lib::fs::DirEntry<'_>) -> bool {
+    disk_atlas_lib::mac::bundle::is_package(entry.name, entry.kind, entry.flags)
+}
+
 /// How the one selected row is reached on its filesystem. Ids in an index built over a host
 /// folder are links inside that index only (`FIRST_SCAN_ID`): the filesystem answers `NotFound`
 /// to them. A hit there is reached by its names, which [`Reach::resolve`] walks on a background
@@ -1458,7 +1469,31 @@ impl Listing {
         let Some(row) = self.row(position) else {
             return;
         };
-        if !row.entry.is_browsable() {
+        // A package is one item: Enter and double-click leave it to Quick Look.
+        if !row.entry.is_browsable() || packages_on(cx) && is_package_entry(&row.entry) {
+            return;
+        }
+        let node = row.entry.node;
+        let name = SharedString::from(row.entry.name.to_owned());
+        self.navigation
+            .update(cx, |navigation, cx| navigation.open_child(node, name, cx));
+    }
+
+    /// True when the row at `position` is a package shown as one item (the `packages_as_folders`
+    /// setting is off).
+    pub fn is_package_row(&self, position: usize, cx: &App) -> bool {
+        packages_on(cx)
+            && self
+                .row(position)
+                .is_some_and(|row| is_package_entry(&row.entry))
+    }
+
+    /// "Show package contents": goes inside the package under the cursor.
+    pub fn open_package_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.shown.cursor_position.and_then(|p| self.row(p)) else {
+            return;
+        };
+        if !row.entry.is_browsable() || self.results.is_some() {
             return;
         }
         let node = row.entry.node;

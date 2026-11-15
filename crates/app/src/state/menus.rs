@@ -94,6 +94,8 @@ pub struct RowFacts {
     pub folder: bool,
     /// A disk image or sparse bundle on the host: "Open in Disk Atlas" comes first.
     pub disk_image: bool,
+    /// A package shown as one item: Quick Look and "Show package contents" in place of "Open".
+    pub package: bool,
 }
 
 /// What a disk heading or a failed whole-disk row offers.
@@ -268,12 +270,20 @@ fn rows_menu(
                 context::OpenInDiskAtlas,
             ));
         }
-        if row.folder {
+        if row.package {
+            open.push(MenuItem::action("Quick Look", quick_look::Toggle));
+            if !in_search {
+                open.push(MenuItem::action(
+                    "Show package contents",
+                    file_list::ShowPackageContents,
+                ));
+            }
+        } else if row.folder {
             open.push(MenuItem::action("Open", file_list::Open));
         } else if on_host {
             open.push(MenuItem::action("Open", file_list::OpenInApp));
         }
-        if !row.folder {
+        if !row.folder && !row.package {
             open.push(MenuItem::action("Quick Look", quick_look::Toggle));
         }
         if in_search {
@@ -547,6 +557,7 @@ mod tests {
         RowFacts {
             folder: false,
             disk_image: false,
+            package: false,
         }
     }
 
@@ -688,6 +699,17 @@ mod tests {
                 "Properties"
             ]
         );
+    }
+
+    #[test]
+    fn a_package_offers_quick_look_and_its_contents_not_open() {
+        let package = RowFacts {
+            package: true,
+            ..folder("Thing.app")
+        };
+        let got = menu(&rows(source(true, false), vec![package], false));
+        assert_eq!(&got[..2], ["Quick Look", "Show package contents"]);
+        assert!(!got.contains(&"Open".to_string()));
     }
 
     #[test]

@@ -18,6 +18,7 @@
 
 pub mod appledouble;
 pub mod bplist;
+pub mod bundle;
 pub mod conventions;
 pub mod sidecar_fs;
 pub mod xattr;
