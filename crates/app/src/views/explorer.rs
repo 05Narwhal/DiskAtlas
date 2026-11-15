@@ -52,6 +52,7 @@ use crate::state::menus::{
 };
 use crate::state::order::{SortColumn, SortSpec};
 use crate::state::search::{Search, SearchEvent};
+use crate::state::thumbnails::{self, Key, Thumbnails, Want};
 use crate::state::view::{ViewEvent, ViewMode, ViewState};
 use crate::state::sources::{Availability, SourceId};
 use crate::theme::{
@@ -282,6 +283,42 @@ fn is_disk_image(name: &str, folder: bool) -> bool {
 /// The text a "Copy as" puts on the clipboard for the row at `position`. On the host a path is
 /// the real one; elsewhere it starts with the volume's name, `/` between names (`:` for the Mac
 /// form), as the breadcrumb and the Folder column of results show it.
+/// The thumbnail of `row` when it is a picture and the listing is a plain folder; a miss is
+/// added to `wants` for the pipeline.
+fn thumbnail_of(
+    listing: &Listing,
+    thumbnails: &Thumbnails,
+    row: &crate::state::listing::Row<'_>,
+    edge: u32,
+    wants: &mut Vec<Want>,
+) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let entry = &row.entry;
+    if listing.in_results() || !thumbnails::eligible(entry.name, entry.kind, entry.size) {
+        return None;
+    }
+    let location = listing.location()?;
+    let key = Key {
+        source: location.source(),
+        node: entry.node,
+        edge,
+        modified: entry.modified.map(|time| time.unix_nanos()),
+    };
+    if let Some(image) = thumbnails.image(&key) {
+        wants.push(Want {
+            key,
+            fs: std::sync::Arc::clone(location.fs()),
+            name: SharedString::from(entry.name.to_owned()),
+        });
+        return Some(image);
+    }
+    wants.push(Want {
+        key,
+        fs: std::sync::Arc::clone(location.fs()),
+        name: SharedString::from(entry.name.to_owned()),
+    });
+    None
+}
+
 fn row_text(listing: &Listing, position: usize, kind: CopyKind, cx: &App) -> Option<String> {
     let row = listing.row(position)?;
     let (separator, mac) = match kind {
@@ -317,6 +354,8 @@ pub struct Explorer {
     listing: Entity<Listing>,
     /// Whether the folder is drawn as a list or as tiles.
     view: Entity<ViewState>,
+    /// Pictures' thumbnails, for tiles and list rows.
+    thumbnails: Entity<Thumbnails>,
     /// Width of the area the tiles fill, as the last frame measured it.
     grid_width: Rc<Cell<Pixels>>,
     /// Tiles across in the icon view, from `grid_width`.
@@ -371,6 +410,7 @@ impl Explorer {
     pub fn new(
         listing: Entity<Listing>,
         view: Entity<ViewState>,
+        thumbnails: Entity<Thumbnails>,
         search: Entity<Search>,
         filter_row: Entity<FilterRow>,
         window: &mut Window,
@@ -378,6 +418,7 @@ impl Explorer {
     ) -> Self {
         let subscriptions = vec![
             cx.subscribe(&search, |_, _, _: &SearchEvent, cx| cx.notify()),
+            cx.observe(&thumbnails, |_, _, cx| cx.notify()),
             cx.subscribe(&view, |this, _, _: &ViewEvent, cx| {
                 // The other layout has other row heights: start at the top.
                 this.scroll.scroll_to_item(0, ScrollStrategy::Top);
@@ -402,6 +443,7 @@ impl Explorer {
         Self {
             listing,
             view,
+            thumbnails,
             grid_width: Rc::new(Cell::new(Pixels::ZERO)),
             grid_columns: icon_grid::UNMEASURED_COLUMNS,
             search,
@@ -1037,6 +1079,9 @@ impl Explorer {
             self.folder_cache.clear();
         }
         let folder_width = self.folder_width.get();
+        let thumbs = self.thumbnails.read(cx);
+        let mut wants = Vec::new();
+        let edge = thumbnails::edge_for(f32::from(Density::default().icon_size()));
         let rows = range
             .map(|position| match listing.row(position) {
                 Some(row) => {
@@ -1046,6 +1091,7 @@ impl Explorer {
                     let under_plate = self.glide_paint.is_some_and(|(to, _)| to == position);
                     let mut file_row = FileRow::new(&row, position, resource_column)
                         .system(listing.system_of(&row))
+                        .thumbnail(thumbnail_of(listing, thumbs, &row, edge, &mut wants))
                         .hover(hover)
                         .under_plate(under_plate);
                     if in_results {
@@ -1072,6 +1118,8 @@ impl Explorer {
                 None => row_frame().into_any_element(),
             })
             .collect();
+        let thumbnails = self.thumbnails.clone();
+        cx.defer(move |cx| thumbnails.update(cx, |t, cx| t.want(wants, cx)));
         if in_results {
             // Sorting the rest of a large result set starts work; keep that out of the paint.
             let listing = self.listing.clone();
@@ -1099,6 +1147,9 @@ impl Explorer {
         let columns = self.grid_columns;
         let side = Self::tile_side();
         let listing = self.listing.read(cx);
+        let thumbs = self.thumbnails.read(cx);
+        let mut wants = Vec::new();
+        let edge = thumbnails::edge_for(side - 16.0);
         let len = listing.len();
         let rows = range
             .clone()
@@ -1108,6 +1159,7 @@ impl Explorer {
                         let row = listing.row(position)?;
                         Some(
                             IconTile::new(&row, position, px(side))
+                                .thumbnail(thumbnail_of(listing, thumbs, &row, edge, &mut wants))
                                 .system(listing.system_of(&row))
                                 .on_mouse_down(cx.listener(
                                     move |this, event: &MouseDownEvent, _, cx| {
@@ -1135,6 +1187,8 @@ impl Explorer {
                     .into_any_element()
             })
             .collect();
+        let thumbnails = self.thumbnails.clone();
+        cx.defer(move |cx| thumbnails.update(cx, |t, cx| t.want(wants, cx)));
         let first = icon_grid::positions(range.start, columns, len).start;
         let last = icon_grid::positions(range.end.saturating_sub(1), columns, len).end;
         let listing = self.listing.clone();

@@ -33,6 +33,7 @@ pub mod sizes;
 pub mod sources;
 pub mod space_map;
 pub mod strip;
+pub mod thumbnails;
 pub mod transfers;
 pub mod view;
 pub mod visibility;

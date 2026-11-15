@@ -216,6 +216,8 @@ pub struct FileRow {
     resource: Option<Option<SharedString>>,
     kind: &'static str,
     glyph: Glyph,
+    /// A picture's thumbnail, drawn in place of the glyph.
+    thumbnail: Option<std::sync::Arc<gpui::RenderImage>>,
     link: bool,
     selected: bool,
     cursor: bool,
@@ -263,6 +265,7 @@ impl FileRow {
             }),
             kind: format::kind(entry.name, entry.kind),
             glyph: Glyph::from_class(classify_entry(entry.name, browsable, None)),
+            thumbnail: None,
             link: entry.kind == NodeKind::Symlink,
             selected: row.selected,
             cursor: row.cursor,
@@ -274,6 +277,12 @@ impl FileRow {
             on_context_menu: None,
             on_hover: None,
         }
+    }
+
+    /// Draws `image` in the icon tile in place of the glyph.
+    pub fn thumbnail(mut self, image: Option<std::sync::Arc<gpui::RenderImage>>) -> Self {
+        self.thumbnail = image;
+        self
     }
 
     /// Draws `amount` of the hover fill (`None`: the row is not under the pointer).
@@ -393,14 +402,22 @@ impl RenderOnce for FileRow {
                             .items_center()
                             .justify_center()
                             .rounded(radius::MARK)
-                            .when(!self.selected, |tile| tile.bg(colors.wash(self.glyph)))
-                            .child(
-                                svg()
+                            .when(!self.selected && self.thumbnail.is_none(), |tile| {
+                                tile.bg(colors.wash(self.glyph))
+                            })
+                            .child(match self.thumbnail {
+                                Some(image) => gpui::img(gpui::ImageSource::Render(image))
+                                    .max_w(icon_size)
+                                    .max_h(icon_size)
+                                    .object_fit(gpui::ObjectFit::Contain)
+                                    .into_any_element(),
+                                None => svg()
                                     .path(self.glyph.path())
                                     .flex_none()
                                     .size(glyph_size)
-                                    .text_color(icon_color),
-                            ),
+                                    .text_color(icon_color)
+                                    .into_any_element(),
+                            }),
                     )
                     .child(name),
             )

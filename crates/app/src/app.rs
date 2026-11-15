@@ -172,6 +172,7 @@ impl Workspace {
             Explorer::new(
                 listing.clone(),
                 view_state.clone(),
+                cx.new(|_| crate::state::thumbnails::Thumbnails::new()),
                 search.clone(),
                 filter_row.clone(),
                 window,

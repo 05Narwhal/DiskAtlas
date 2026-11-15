@@ -1416,6 +1416,7 @@ dependencies = [
  "chrono",
  "disk-atlas-lib",
  "gpui",
+ "image",
  "sha2 0.10.9",
  "tracing",
  "tracing-subscriber",
