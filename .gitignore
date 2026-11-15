@@ -34,3 +34,6 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 # <<<<< END CPM-MANAGED >>>>>
+
+# Parallel work lanes (git worktrees)
+/.worktrees

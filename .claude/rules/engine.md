@@ -5,7 +5,7 @@ paths:
 
 # Engine rules (crates/lib)
 
-- Read-only. No code path opens a device or image with write access.
+- Write support is per format: a format gets a writer when it is built and verified; until then it is read-only and no code path opens its device or image with write access. Writes need an explicit, confirmed user action.
 - Untrusted input. Validate every on-disk length, offset, count and index before use. Checked arithmetic on disk values. Bounded loops on linked structures. Errors, never panics. Fuzz targets exist for every parser that takes raw bytes.
 - No `gpui`, no async runtime, no UI types. Public API is blocking, `Send + Sync`, `&self`.
 - Parse in place from the block buffer through typed big-endian or little-endian views. Do not build owned copies of on-disk structures on hot paths.
