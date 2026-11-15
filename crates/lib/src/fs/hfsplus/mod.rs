@@ -46,12 +46,12 @@ use journal::JournalState;
 use links::{LinkResolver, link_of};
 use volume_header::{Located, VolumeHeader, hfs_time, locate, read_header};
 
-mod allocation;
+pub(crate) mod allocation;
 pub mod attributes;
 pub mod btree;
 // `be_i16` still has no caller outside tests.
 #[allow(dead_code)]
-mod bytes;
+pub(crate) mod bytes;
 pub mod catalog;
 pub mod compression;
 pub mod extents;

@@ -13,4 +13,17 @@
 //
 // See the LICENSE file for the full license text.
 
-//! Classic HFS, read-only (big-endian). Built in M6.
+//! Classic HFS (big-endian), the Mac OS volume format before HFS+.
+//!
+//! The catalog and extents overflow files are B-trees read through the
+//! shared [`crate::fs::hfsplus::btree`] reader; forks map through
+//! [`crate::fs::hfsplus::extents::ForkMap`]. Built in M6.
+
+pub mod catalog;
+pub mod encoding;
+pub mod extents;
+#[cfg(test)]
+mod fuzz_seeds;
+pub mod mdb;
+#[cfg(test)]
+pub(crate) mod test_volume;
