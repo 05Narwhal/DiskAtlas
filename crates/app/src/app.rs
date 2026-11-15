@@ -18,8 +18,9 @@
 use std::time::Instant;
 
 use gpui::{
-    Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, NavigationDirection,
-    PathPromptOptions, Render, Subscription, Window, WindowHandle, div, prelude::*,
+    AnyElement, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
+    NavigationDirection, PathPromptOptions, Render, Subscription, Window, WindowHandle, div,
+    prelude::*,
 };
 
 use crate::components::{
@@ -34,8 +35,8 @@ use crate::components::{
 };
 use crate::keymap::workspace::{
     FocusNext, FocusPrev, GoBack, GoForward, GoUp, LeaveSearch, OpenImage, OpenImageFolder,
-    OpenSettings, Properties, Refresh, Search as FocusSearch, ToggleDetails, ToggleHidden,
-    ToggleSystemItems,
+    OpenSettings, Properties, Refresh, Search as FocusSearch, ShowList, ShowOnDisk, ShowSpaceMap,
+    ToggleDetails, ToggleHidden, ToggleSystemItems,
 };
 use crate::keymap::{context, file_list, quick_look};
 use crate::state::settings::{SettingValue, Settings};
@@ -46,16 +47,20 @@ use crate::state::{
     quick_look::{QuickLook, Tab},
     search::{Search, SearchEvent},
     sizes::Sizes,
-    sources::{Sources, SourcesEvent},
+    sources::{SourceKind, Sources, SourcesEvent},
+    space_map::SpaceMap,
     strip::Strip,
+    view::{ViewMode, ViewState},
 };
 use crate::theme::{
     Theme, fonts,
     motion::{self, Disclosure},
     scale::{elevation, radius, size, text},
 };
+use crate::views::disk_view::DiskView;
 use crate::views::explorer::Explorer;
 use crate::views::preview::QuickLookWindow;
+use crate::views::space_map::SpaceMapView;
 
 /// The window's root view.
 pub struct Workspace {
@@ -69,6 +74,9 @@ pub struct Workspace {
     sidebar: Entity<Sidebar>,
     storage_bar: Entity<StorageBar>,
     explorer: Entity<Explorer>,
+    view_state: Entity<ViewState>,
+    map_view: Entity<SpaceMapView>,
+    disk_view: Entity<DiskView>,
     statusbar: Entity<StatusBar>,
     details: Entity<Details>,
     details_visible: bool,
@@ -113,7 +121,30 @@ impl Workspace {
                 cx,
             )
         });
-        let sidebar = cx.new(|cx| Sidebar::new(sources.clone(), navigation.clone(), window, cx));
+        let view_state = cx.new(|cx| ViewState::new(sources.clone(), navigation.clone(), cx));
+        let sidebar = cx.new(|cx| {
+            Sidebar::new(
+                sources.clone(),
+                navigation.clone(),
+                view_state.clone(),
+                window,
+                cx,
+            )
+        });
+        let space_map = cx.new(|cx| {
+            SpaceMap::new(
+                sources.clone(),
+                navigation.clone(),
+                search.clone(),
+                sizes.clone(),
+                listing.clone(),
+                view_state.clone(),
+                cx,
+            )
+        });
+        let map_view = cx.new(|cx| SpaceMapView::new(space_map.clone(), view_state.clone(), cx));
+        let disk_view =
+            cx.new(|cx| DiskView::new(sources.clone(), view_state.clone(), map_view.clone(), cx));
         let strip =
             cx.new(|cx| Strip::new(sources.clone(), navigation.clone(), listing.clone(), cx));
         let disk_strip =
@@ -125,6 +156,7 @@ impl Workspace {
                 sizes.clone(),
                 search.clone(),
                 listing.clone(),
+                view_state.clone(),
                 disk_strip,
                 cx,
             )
@@ -272,6 +304,16 @@ impl Workspace {
 
         window.focus(&explorer.focus_handle(cx));
 
+        // Debug builds: DISK_ATLAS_OPEN_IMAGE=<path> opens a disk image at start, so a screenshot
+        // run needs no file dialog.
+        if cfg!(debug_assertions)
+            && let Some(path) = std::env::var_os("DISK_ATLAS_OPEN_IMAGE")
+        {
+            sources.update(cx, |sources, cx| {
+                sources.open_image(std::path::PathBuf::from(path), cx);
+            });
+        }
+
         Self {
             sources,
             navigation,
@@ -283,6 +325,9 @@ impl Workspace {
             sidebar,
             storage_bar,
             explorer,
+            view_state,
+            map_view,
+            disk_view,
             statusbar,
             details,
             details_visible: true,
@@ -318,6 +363,37 @@ impl Workspace {
     /// Ctrl+Shift+. and the View menu: flips `show_hidden`.
     fn toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
         flip(cx, "show_hidden");
+    }
+
+    /// Ctrl+1: the folder as a list.
+    fn show_list(&mut self, _: &ShowList, window: &mut Window, cx: &mut Context<Self>) {
+        self.view_state
+            .update(cx, |view, cx| view.set_mode(ViewMode::List, cx));
+        window.focus(&self.explorer.focus_handle(cx));
+    }
+
+    /// Ctrl+3: the folder as the space map.
+    fn show_space_map(&mut self, _: &ShowSpaceMap, window: &mut Window, cx: &mut Context<Self>) {
+        self.view_state
+            .update(cx, |view, cx| view.set_mode(ViewMode::SpaceMap, cx));
+        window.focus(&self.map_view.focus_handle(cx));
+    }
+
+    /// "Show where it is on the disk": the disk view of the disk the folder is on, in Layout mode.
+    fn show_on_disk(&mut self, _: &ShowOnDisk, _: &mut Window, cx: &mut Context<Self>) {
+        let disk = self
+            .navigation
+            .read(cx)
+            .current()
+            .and_then(|location| self.sources.read(cx).source(location.source()))
+            .and_then(|source| match source.kind {
+                SourceKind::Volume { disk, .. } => Some(disk),
+                _ => None,
+            });
+        if let Some(disk) = disk {
+            self.view_state
+                .update(cx, |view, cx| view.show_disk_layout(disk, cx));
+        }
     }
 
     /// Ctrl+, : opens the Settings window, or brings the open one forward.
@@ -567,6 +643,17 @@ impl Render for Workspace {
             crate::frame_trace::note(cx, "details-pane");
         }
 
+        // The folder as a list, as the space map, or inside the disk view.
+        let main_area: AnyElement = {
+            let view = self.view_state.read(cx);
+            if view.disk().is_some() {
+                self.disk_view.clone().into_any_element()
+            } else if view.mode() == ViewMode::SpaceMap {
+                self.map_view.clone().into_any_element()
+            } else {
+                self.explorer.clone().into_any_element()
+            }
+        };
         let mut content = div().flex().flex_row().size_full().child(
             div()
                 .flex_1()
@@ -574,7 +661,7 @@ impl Render for Workspace {
                 .h_full()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h_0().child(self.explorer.clone()))
+                .child(div().flex_1().min_h_0().child(main_area))
                 .child(self.statusbar.clone()),
         );
         if self.details_visible || details_frame.is_some() {
@@ -610,6 +697,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_system_items))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_properties))
+            .on_action(cx.listener(Self::show_list))
+            .on_action(cx.listener(Self::show_space_map))
+            .on_action(cx.listener(Self::show_on_disk))
             .on_action(cx.listener(Self::toggle_details_action))
             .on_action(cx.listener(Self::open_image))
             .on_action(cx.listener(Self::open_image_folder))

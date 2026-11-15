@@ -41,6 +41,9 @@ pub const SETTINGS_SEGMENTS: &str = "SettingsSegments";
 /// frame's `AuxWindow`, so Escape and Ctrl+W close the window from anywhere in it.
 pub const PROPERTIES: &str = "Properties";
 
+/// Key context of the space map (`views/space_map.rs`).
+pub const SPACE_MAP: &str = "SpaceMap";
+
 /// Key context of the Quick Look panel (`views/preview.rs`).
 pub const QUICK_LOOK: &str = "QuickLook";
 
@@ -295,6 +298,19 @@ pub mod settings {
     );
 }
 
+/// Actions of the space map.
+pub mod space_map {
+    gpui::actions!(
+        space_map,
+        [
+            /// Go out to the enclosing folder (Backspace).
+            ZoomOut,
+            /// Open the region under the pointer, or the folder, in the list (Enter).
+            OpenInList,
+        ]
+    );
+}
+
 /// Actions of the whole window: history, enclosing folder, panes.
 pub mod workspace {
     gpui::actions!(
@@ -331,6 +347,12 @@ pub mod workspace {
             /// Open the Properties window of the selection, or of the folder shown when nothing
             /// is selected (Alt+Enter, Ctrl+I).
             Properties,
+            /// Show the folder as a list (Ctrl+1).
+            ShowList,
+            /// Show the folder as the space map (Ctrl+3).
+            ShowSpaceMap,
+            /// Open the disk view in Layout mode: where the selected file lies on the disk.
+            ShowOnDisk,
         ]
     );
 }
@@ -398,6 +420,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("f5", Refresh, None),
         KeyBinding::new("secondary-shift-.", ToggleHidden, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new("secondary-1", ShowList, None),
+        KeyBinding::new("secondary-3", ShowSpaceMap, None),
         // Ctrl on every platform, as the design says: Cmd+Tab is the system's.
         KeyBinding::new("ctrl-tab", quick_look::NextTab, None),
         KeyBinding::new("ctrl-shift-tab", quick_look::PreviousTab, None),
@@ -420,6 +444,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("right", settings::Next, Some(SETTINGS_SEGMENTS)),
     ]);
     // Inside the panel the arrow keys still move the selection of the list.
+    cx.bind_keys([
+        KeyBinding::new("backspace", space_map::ZoomOut, Some(SPACE_MAP)),
+        KeyBinding::new("enter", space_map::OpenInList, Some(SPACE_MAP)),
+    ]);
     let panel = Some(QUICK_LOOK);
     cx.bind_keys([
         KeyBinding::new("escape", quick_look::Close, panel),

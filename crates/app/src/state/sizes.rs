@@ -1296,6 +1296,15 @@ impl Sizes {
             .map(|built| Arc::clone(&built.table))
     }
 
+    /// The measured tree of a host source, once made. Querying it (`classes`, `children`) is
+    /// O(subtree): do that on the background executor.
+    pub fn host(&self, source: SourceId) -> Option<Arc<HostSizes>> {
+        match self.hosts.get(&source) {
+            Some(HostSlot::Ready(table)) => Some(Arc::clone(&table.sizes)),
+            _ => None,
+        }
+    }
+
     /// True when the table of `source` is a lower bound: the bar says "at least X counted".
     pub fn is_lower_bound(&self, source: SourceId) -> bool {
         self.tables

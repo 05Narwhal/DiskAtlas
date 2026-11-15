@@ -29,6 +29,8 @@ pub mod selection;
 pub mod settings;
 pub mod sizes;
 pub mod sources;
+pub mod space_map;
 pub mod strip;
 pub mod transfers;
+pub mod view;
 pub mod visibility;

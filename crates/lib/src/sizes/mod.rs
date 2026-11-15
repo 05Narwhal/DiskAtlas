@@ -26,6 +26,7 @@
 
 pub mod host;
 pub mod index;
+pub mod map;
 pub mod watch;
 
 pub use host::{
@@ -33,3 +34,7 @@ pub use host::{
     size_workers,
 };
 pub use index::{ClassBytes, DENSE_NODE_LIMIT, IndexSizes, MAX_LINK_NESTING, Totals};
+pub use map::{
+    LABEL_MIN_H, LABEL_MIN_W, LayoutOptions, MAX_TILES, MIN_TILE_PX, MapItem, MapNode, MapTarget,
+    Rect, Tile, host_map, index_map, layout, squarify,
+};

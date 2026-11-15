@@ -16,7 +16,9 @@
 //! Top-level views.
 
 pub mod aux_window;
+pub mod disk_view;
 pub mod explorer;
 pub mod preview;
 pub mod properties;
 pub mod settings;
+pub mod space_map;

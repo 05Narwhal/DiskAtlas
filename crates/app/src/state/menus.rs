@@ -66,8 +66,8 @@ pub struct Built {
 pub const BUILT: Built = Built {
     properties: true,
     host_operations: false,
-    space_map: false,
-    layout_mode: false,
+    space_map: true,
+    layout_mode: true,
     pins: false,
     open_copy: false,
     trash_rows: false,
@@ -288,6 +288,22 @@ fn rows_menu(
             context::ShowInFileManager,
         ));
     }
+    // The map and the disk view show the folder shown: a search hit is not in it.
+    if single && !in_search {
+        if state.built.space_map {
+            place.push(MenuItem::action(
+                "Show on the space map",
+                workspace::ShowSpaceMap,
+            ));
+        }
+        // Only where Disk Atlas reads the disk itself: a host file's pieces are not known.
+        if state.built.layout_mode && !source.host && first.is_some_and(|row| !row.folder) {
+            place.push(MenuItem::action(
+                "Show where it is on the disk",
+                workspace::ShowOnDisk,
+            ));
+        }
+    }
 
     let (name, path) = if single {
         ("Name", "Path")
@@ -343,13 +359,25 @@ fn folder_menu(source: &SourceFacts, in_search: bool, state: &MenuState) -> Vec<
         }
     }
     let mut first = Vec::new();
+    let mut view = Vec::new();
+    if state.built.space_map {
+        view.push(MenuItem::action("List", workspace::ShowList));
+        view.push(MenuItem::action("Space map", workspace::ShowSpaceMap));
+    }
     if state.built.visibility_toggles {
-        let view = vec![
+        if !view.is_empty() {
+            view.push(MenuItem::Separator);
+        }
+        view.push(
             MenuItem::action("Show hidden items", workspace::ToggleHidden)
                 .checked(state.show_hidden),
+        );
+        view.push(
             MenuItem::action("Show housekeeping files", workspace::ToggleSystemItems)
                 .checked(state.show_system),
-        ];
+        );
+    }
+    if !view.is_empty() {
         first.push(MenuItem::submenu("View", view));
     }
     first.push(sort);
@@ -569,6 +597,9 @@ mod tests {
             [
                 "Quick Look",
                 "-",
+                "Show on the space map",
+                "Show where it is on the disk",
+                "-",
                 "Copy as >",
                 "  Name",
                 "  Path",
@@ -605,6 +636,7 @@ mod tests {
                 "Quick Look",
                 "-",
                 "Show in Explorer",
+                "Show on the space map",
                 "-",
                 "Copy as >",
                 "  Name",
@@ -685,8 +717,6 @@ mod tests {
             "Rename",
             "Paste",
             "Recycle",
-            "space map",
-            "Layout",
             "Pin",
             "Show original",
             "Open a copy",
@@ -710,6 +740,9 @@ mod tests {
             got,
             [
                 "View >",
+                "  List",
+                "  Space map",
+                "  -",
                 "  Show hidden items",
                 "  Show housekeeping files",
                 "Sort by >",
@@ -747,9 +780,12 @@ mod tests {
             &state,
         ));
         assert_eq!(
-            &got[..3],
+            &got[..6],
             [
                 "View >",
+                "  List",
+                "  Space map",
+                "  -",
                 "  Show hidden items*",
                 "  Show housekeeping files"
             ]
@@ -763,8 +799,8 @@ mod tests {
             in_search: true,
         });
         assert_eq!(got[0], "View >");
-        assert_eq!(got[3], "Sort by >");
-        assert_eq!(got[4], "  Relevance");
+        assert_eq!(got[6], "Sort by >");
+        assert_eq!(got[7], "  Relevance");
         assert!(!got.contains(&"Refresh".to_owned()));
         assert!(got.contains(&"  Folder".to_owned()));
     }
