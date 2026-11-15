@@ -16,8 +16,8 @@
 //! Disk image formats. Each one yields a `BlockSource`.
 //!
 //! [`open`] sniffs the format from the content, never the file name, and
-//! opens the image read-only. Raw, UDIF, sparse image and sparse bundle
-//! have readers; DiskCopy 4.2 is recognised so it can be reported by name.
+//! opens the image read-only. Raw, UDIF, sparse image, sparse bundle and
+//! DiskCopy 4.2 have readers.
 
 use std::io;
 use std::path::Path;
@@ -101,7 +101,7 @@ pub fn open(path: &Path) -> Result<Image> {
         ImageFormat::Udif => udif::open(path)?,
         ImageFormat::SparseImage => sparseimage::open(path)?,
         ImageFormat::SparseBundle => sparsebundle::open(path)?,
-        other => return Err(Error::unsupported(format!("{} files", other.name()))),
+        ImageFormat::DiskCopy42 => dc42::open(path)?,
     };
     Ok(Image { format, source })
 }
@@ -327,8 +327,12 @@ mod tests {
         bytes.resize(DC42_HEADER + 1024, 0);
         let tmp = Temp::file(&bytes);
         assert_eq!(detect(&tmp.0).unwrap(), ImageFormat::DiskCopy42);
-        let err = open(&tmp.0).err().unwrap();
-        assert!(is_unsupported(&err, "DiskCopy 4.2 files"), "{err}");
+        let image = open(&tmp.0).unwrap();
+        assert_eq!(image.format, ImageFormat::DiskCopy42);
+        assert_eq!(image.source.len(), 1024);
+        // Data size 0 sniffs as DiskCopy 4.2 but has no disk to open.
+        let tmp = Temp::file(&dc42_header(0));
+        assert!(open(&tmp.0).is_err());
     }
 
     #[test]

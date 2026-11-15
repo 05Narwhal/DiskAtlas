@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::fs::{FileSystem, hfsplus};
+use crate::fs::{FileSystem, hfs, hfsplus};
 use crate::io::block::BlockSource;
 
 /// How many bytes from the start of a source the probes see. ISO 9660's
@@ -40,6 +40,9 @@ pub enum Content {
     HfsWrapped,
     /// A classic HFS volume.
     Hfs,
+    /// A Macintosh File System volume (400K floppies, before HFS). Detected
+    /// and reported; there is no reader.
+    Mfs,
     /// A Core Storage physical volume (Fusion Drive, FileVault 2 on HFS+).
     CoreStorage,
     /// An NTFS volume.
@@ -68,6 +71,7 @@ impl Content {
             Self::HfsPlus | Self::HfsWrapped => "HFS+",
             Self::Hfsx => "HFSX",
             Self::Hfs => "HFS",
+            Self::Mfs => "MFS",
             Self::CoreStorage => "Core Storage",
             Self::Ntfs => "NTFS",
             Self::ExFat => "exFAT",
@@ -114,6 +118,10 @@ pub static PROBES: &[Probe] = &[
     Probe {
         name: "hfs",
         check: check_hfs,
+    },
+    Probe {
+        name: "mfs",
+        check: check_mfs,
     },
     Probe {
         name: "core-storage",
@@ -285,8 +293,9 @@ pub fn mount(source: Arc<dyn BlockSource>, content: Content) -> Result<Option<Mo
         Content::HfsPlus | Content::Hfsx | Content::HfsWrapped => {
             Ok(Some(Mount::Volume(Arc::new(hfsplus::mount(source)?))))
         }
+        Content::Hfs => Ok(Some(Mount::Volume(Arc::new(hfs::mount(source)?)))),
         Content::Apfs
-        | Content::Hfs
+        | Content::Mfs
         | Content::CoreStorage
         | Content::Ntfs
         | Content::ExFat
@@ -347,6 +356,11 @@ fn check_hfs_wrapped(head: &[u8], _len: u64) -> Option<Content> {
 /// A classic HFS master directory block: `BD` at byte 1024.
 fn check_hfs(head: &[u8], _len: u64) -> Option<Content> {
     (be16(head, 1024)? == 0x4244).then_some(Content::Hfs)
+}
+
+/// A Macintosh File System master directory block: `D2 D7` at byte 1024.
+fn check_mfs(head: &[u8], _len: u64) -> Option<Content> {
+    (be16(head, 1024)? == 0xD2D7).then_some(Content::Mfs)
 }
 
 /// Core Storage physical volume header: format version 1 at byte 8, block
@@ -444,6 +458,7 @@ mod tests {
                 fixture(&[(1024, b"BD"), (1148, b"H+")]),
             ),
             (Content::Hfs, "hfs", fixture(&[(1024, b"BD")])),
+            (Content::Mfs, "mfs", fixture(&[(1024, &[0xD2, 0xD7])])),
             (
                 Content::CoreStorage,
                 "core-storage",
@@ -577,6 +592,7 @@ mod tests {
             (Content::Hfsx, "HFSX"),
             (Content::HfsWrapped, "HFS+"),
             (Content::Hfs, "HFS"),
+            (Content::Mfs, "MFS"),
             (Content::CoreStorage, "Core Storage"),
             (Content::Ntfs, "NTFS"),
             (Content::ExFat, "exFAT"),

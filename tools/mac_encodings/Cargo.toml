@@ -1,0 +1,13 @@
+[package]
+name = "mac_encodings"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Julian A. Loy"]
+description = "Generates crates/lib/src/fs/hfs/encoding/tables.rs from Apple's Mac OS encoding mapping files."
+publish = false
+
+# Standalone: not a member of the repository workspace, and std-only.
+[workspace]
+
+[dependencies]

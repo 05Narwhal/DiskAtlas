@@ -187,6 +187,70 @@ impl ForkMap {
         Some((physical, avail))
     }
 
+    /// A fork from runs the caller collected itself (classic HFS), in fork
+    /// order. Every run must be non-empty and end inside
+    /// `geometry.total_blocks`; the runs' sum must fit in `u32`. The runs
+    /// may cover more or fewer blocks than `logical_size` needs: reads past
+    /// the logical size are refused by [`ForkSource`], reads past the mapped
+    /// runs fail as unmapped.
+    pub(crate) fn from_runs(
+        file_id: u32,
+        logical_size: u64,
+        runs: Vec<ExtentDescriptor>,
+        geometry: Geometry,
+    ) -> Result<ForkMap> {
+        let error = |kind| {
+            Error::Corrupt(Corruption::new(
+                FORK,
+                Location::Object(u64::from(file_id)),
+                kind,
+            ))
+        };
+        let mut mapped: u32 = 0;
+        let mut out = Vec::with_capacity(runs.len());
+        for extent in runs {
+            if extent.block_count == 0 {
+                return Err(error(CorruptKind::InvalidValue {
+                    field: "extent block count",
+                    value: 0,
+                }));
+            }
+            let end = extent
+                .start_block
+                .checked_add(extent.block_count)
+                .ok_or_else(|| {
+                    error(CorruptKind::Overflow {
+                        field: "extent end",
+                    })
+                })?;
+            if end > geometry.total_blocks {
+                return Err(error(CorruptKind::OutOfRange {
+                    field: "extent end",
+                    value: u64::from(end),
+                    limit_name: "volume blocks",
+                    limit: u64::from(geometry.total_blocks),
+                }));
+            }
+            let next = mapped.checked_add(extent.block_count).ok_or_else(|| {
+                error(CorruptKind::Overflow {
+                    field: "mapped blocks",
+                })
+            })?;
+            out.push(Run {
+                logical_block: mapped,
+                extent,
+            });
+            mapped = next;
+        }
+        Ok(ForkMap {
+            file_id,
+            block_size: geometry.block_size,
+            logical_size,
+            mapped_blocks: mapped,
+            runs: out,
+        })
+    }
+
     fn unmapped(&self, value: u64) -> Error {
         Error::Corrupt(Corruption::new(
             FORK,
@@ -1017,6 +1081,114 @@ mod tests {
             CorruptKind::OutOfRange {
                 limit_name: "fork blocks",
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn from_runs_maps_and_reads_in_order() {
+        let runs = vec![ext(10, 2), ext(20, 1), ext(5, 2)];
+        let m = ForkMap::from_runs(FILE, 4 * 512 + 10, runs, geometry()).unwrap();
+        assert_eq!(
+            m.runs().collect::<Vec<_>>(),
+            [(0, ext(10, 2)), (1024, ext(20, 1)), (1536, ext(5, 2))]
+        );
+        assert_content(&source(m), &[10, 11, 20, 5, 6]);
+        // Runs ending exactly on the last volume block are fine.
+        assert!(ForkMap::from_runs(FILE, 512, vec![ext(63, 1)], geometry()).is_ok());
+    }
+
+    #[test]
+    fn from_runs_physical_larger_and_smaller_than_logical() {
+        // Physical larger: reads stop at the logical size.
+        let m = ForkMap::from_runs(FILE, 100, vec![ext(10, 4)], geometry()).unwrap();
+        let src = source(m);
+        assert_content(&src, &[10]);
+        assert!(matches!(
+            src.read_at(0, &mut [0u8; 101]),
+            Err(Error::OutOfBounds { .. })
+        ));
+        // Physical smaller: the unmapped tail fails.
+        let src = source(ForkMap::from_runs(FILE, 2048, vec![ext(10, 2)], geometry()).unwrap());
+        src.read_at(0, &mut [0u8; 1024]).unwrap();
+        let c = corrupt(src.read_at(1000, &mut [0u8; 100]));
+        assert!(matches!(
+            c.kind,
+            CorruptKind::OutOfRange {
+                limit_name: "end of mapped extents",
+                limit: 1024,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn from_runs_empty() {
+        let m = ForkMap::from_runs(FILE, 0, Vec::new(), geometry()).unwrap();
+        assert_eq!(m.runs().count(), 0);
+        let src = source(m);
+        assert_eq!(src.len(), 0);
+        src.read_at(0, &mut []).unwrap();
+    }
+
+    #[test]
+    fn from_runs_rejects_bad_runs() {
+        let c = corrupt(ForkMap::from_runs(
+            FILE,
+            512 * 10,
+            vec![ext(10, 2), ext(60, 8)],
+            geometry(),
+        ));
+        assert_eq!(c.location, Location::Object(u64::from(FILE)));
+        assert!(matches!(
+            c.kind,
+            CorruptKind::OutOfRange {
+                field: "extent end",
+                value: 68,
+                limit_name: "volume blocks",
+                limit: 64,
+            }
+        ));
+        let c = corrupt(ForkMap::from_runs(
+            FILE,
+            512,
+            vec![ext(0xFFFF_FFF0, 0x20)],
+            geometry(),
+        ));
+        assert!(matches!(
+            c.kind,
+            CorruptKind::Overflow {
+                field: "extent end"
+            }
+        ));
+        let c = corrupt(ForkMap::from_runs(
+            FILE,
+            512,
+            vec![ext(10, 1), ext(20, 0)],
+            geometry(),
+        ));
+        assert!(matches!(
+            c.kind,
+            CorruptKind::InvalidValue {
+                field: "extent block count",
+                value: 0
+            }
+        ));
+        // Overlapping runs whose sum passes u32 on a huge volume.
+        let huge = Geometry {
+            block_size: 512,
+            total_blocks: u32::MAX,
+        };
+        let c = corrupt(ForkMap::from_runs(
+            FILE,
+            0,
+            vec![ext(0, u32::MAX), ext(0, 1)],
+            huge,
+        ));
+        assert!(matches!(
+            c.kind,
+            CorruptKind::Overflow {
+                field: "mapped blocks"
             }
         ));
     }
