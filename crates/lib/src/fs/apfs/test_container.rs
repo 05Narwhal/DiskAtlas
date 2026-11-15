@@ -21,9 +21,9 @@ use std::sync::Arc;
 use super::btree::{INFO_LEN, Layout};
 use super::container::Blocks;
 use super::object::{
-    OBJ_EPHEMERAL, OBJ_PHYSICAL, TYPE_BTREE, TYPE_BTREE_NODE, TYPE_CHECKPOINT_MAP, TYPE_FS,
-    TYPE_FSTREE, TYPE_NX_SUPERBLOCK, TYPE_OMAP, TYPE_OMAP_TREE, TYPE_SPACEMAN, TYPE_SPACEMAN_CIB,
-    seal,
+    OBJ_EPHEMERAL, OBJ_NOHEADER, OBJ_PHYSICAL, TYPE_BTREE, TYPE_BTREE_NODE, TYPE_CHECKPOINT_MAP,
+    TYPE_FEXT_TREE, TYPE_FS, TYPE_FSTREE, TYPE_NX_SUPERBLOCK, TYPE_OMAP, TYPE_OMAP_TREE,
+    TYPE_SNAPMETATREE, TYPE_SPACEMAN, TYPE_SPACEMAN_CIB, seal,
 };
 use crate::io::block::MemSource;
 
@@ -686,6 +686,11 @@ pub(crate) struct VolumeSpec {
     pub fs: FsSpec,
     /// Raw sorted records used instead of `fs`, for damage tests.
     pub records: Option<Records>,
+    /// Sealed: the file-system tree has no headers, extents are in a
+    /// file-extent tree.
+    pub sealed: bool,
+    /// Older states of the volume.
+    pub snapshots: Vec<SnapSpec>,
     /// Records per file-system tree node.
     pub per_node: usize,
     pub uuid: [u8; 16],
@@ -701,6 +706,8 @@ impl VolumeSpec {
             fs_flags: 1,
             fs: FsSpec::new(),
             records: None,
+            sealed: false,
+            snapshots: Vec::new(),
             per_node: 16,
             uuid: [0x11; 16],
         }
@@ -957,37 +964,184 @@ fn write_volume(
     oid: u64,
     next_oid: &mut u64,
 ) -> u64 {
+    let hashed = spec.hashed();
+    let sealed = spec.sealed;
+    // The live tree is mapped after every snapshot.
+    let live_xid = spec
+        .snapshots
+        .iter()
+        .map(|s| s.xid)
+        .max()
+        .map_or(MAP_XID, |x| x + 1);
+    let fs_opts = |xid: u64| NodeOpts {
+        headers: !sealed,
+        xid,
+        ..NodeOpts::fs_tree(spec.per_node)
+    };
+    let map_flags = if sealed { OMAP_NOHEADER } else { 0 };
+    let mut entries = Vec::new();
+    let first_oid = *next_oid;
+    let mut last_oid = first_oid;
+
+    // Snapshots: older trees from the same first oid, mapped at their own
+    // transactions, so the oids the live tree reuses resolve by xid.
+    let mut snaps = Vec::new();
+    for snap in &spec.snapshots {
+        let mut counter = first_oid;
+        let (records, _) = split_extents(snap.fs.records(img, hashed), false);
+        let tree = write_tree(img, &records, fs_opts(snap.xid), &mut counter);
+        last_oid = last_oid.max(counter);
+        entries.extend(
+            tree.mappings
+                .iter()
+                .map(|&(o, p)| (o, snap.xid, map_flags, p)),
+        );
+        snaps.push((snap, tree.root_oid, img.alloc()));
+    }
+    let mut counter = first_oid;
     let records = match &spec.records {
         Some(r) => r.clone(),
-        None => spec.fs.records(img, spec.hashed()),
+        None => spec.fs.records(img, hashed),
     };
-    let tree = write_tree(img, &records, NodeOpts::fs_tree(spec.per_node), next_oid);
-    let entries: Vec<_> = tree
-        .mappings
-        .iter()
-        .map(|&(oid, paddr)| (oid, MAP_XID, 0u32, paddr))
-        .collect();
+    let (records, fext) = split_extents(records, sealed);
+    let tree = write_tree(img, &records, fs_opts(live_xid), &mut counter);
+    last_oid = last_oid.max(counter);
+    *next_oid = last_oid;
+    entries.extend(
+        tree.mappings
+            .iter()
+            .map(|&(o, p)| (o, live_xid, map_flags, p)),
+    );
     let omap = write_omap(img, &entries, 16);
+
+    // The snapshot metadata tree: one record per snapshot and one name
+    // record per snapshot (type 11, skipped by the reader).
+    let mut meta: Records = Vec::new();
+    for (snap, _, sb_paddr) in &snaps {
+        let mut v = vec![0u8; 50];
+        v[8..16].copy_from_slice(&sb_paddr.to_le_bytes());
+        v[16..24].copy_from_slice(&(TIMES[0] + snap.xid).to_le_bytes());
+        let mut name = snap.name.as_bytes().to_vec();
+        name.push(0);
+        v[48..50].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        v.extend_from_slice(&name);
+        meta.push((super::records::encode::key(snap.xid, 1), v));
+        let mut k = super::records::encode::key(super::records::OBJ_ID_MASK, 11);
+        k.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        k.extend_from_slice(&name);
+        meta.push((k, snap.xid.to_le_bytes().to_vec()));
+    }
+    meta.sort_by_key(|(k, _)| order(k, false));
+    let meta_tree = write_tree(
+        img,
+        &meta,
+        NodeOpts {
+            layout: Layout::Variable,
+            per_node: 8,
+            subtype: TYPE_SNAPMETATREE,
+            physical: true,
+            headers: true,
+            xid: live_xid,
+        },
+        &mut 0,
+    );
+    let fext_root = (sealed && !fext.is_empty()).then(|| {
+        write_tree(
+            img,
+            &fext,
+            NodeOpts {
+                layout: Layout::Fixed { key: 16, value: 16 },
+                per_node: 6,
+                subtype: TYPE_FEXT_TREE,
+                physical: true,
+                headers: false,
+                xid: live_xid,
+            },
+            &mut 0,
+        )
+        .root_paddr
+    });
+
+    let superblock = |xid: u64, root_oid: u64| {
+        let mut b = vec![0u8; BS];
+        header(&mut b, oid, xid, u32::from(TYPE_FS), 0);
+        b[32..36].copy_from_slice(b"APSB");
+        put_u32(&mut b, 36, index);
+        let mut incompatible = spec.incompatible;
+        if sealed {
+            incompatible |= 0x20;
+        }
+        put_u64(&mut b, 56, incompatible);
+        let noheader = if sealed { OBJ_NOHEADER } else { 0 };
+        put_u32(&mut b, 116, u32::from(TYPE_BTREE) | noheader);
+        put_u32(&mut b, 120, OBJ_PHYSICAL | u32::from(TYPE_BTREE));
+        put_u32(&mut b, 124, OBJ_PHYSICAL | u32::from(TYPE_BTREE));
+        put_u64(&mut b, 128, omap);
+        put_u64(&mut b, 136, root_oid);
+        put_u64(&mut b, 152, meta_tree.root_paddr);
+        b[240..256].copy_from_slice(&spec.uuid);
+        put_u64(&mut b, 256, 1_700_000_000_000_000_000 + xid);
+        put_u64(&mut b, 264, spec.fs_flags);
+        let name = spec.name.as_bytes();
+        b[704..704 + name.len()].copy_from_slice(name);
+        put_u16(&mut b, 964, spec.role);
+        if let Some(root) = fext_root {
+            put_u64(&mut b, 1032, root);
+            put_u32(
+                &mut b,
+                1040,
+                OBJ_PHYSICAL | OBJ_NOHEADER | u32::from(TYPE_BTREE),
+            );
+        }
+        seal(&mut b);
+        b
+    };
+    for (snap, root_oid, sb_paddr) in &snaps {
+        img.put(*sb_paddr, superblock(snap.xid, *root_oid));
+    }
     let paddr = img.alloc();
-    let mut b = vec![0u8; BS];
-    header(&mut b, oid, MAP_XID, u32::from(TYPE_FS), 0);
-    b[32..36].copy_from_slice(b"APSB");
-    put_u32(&mut b, 36, index);
-    put_u64(&mut b, 56, spec.incompatible);
-    put_u32(&mut b, 116, u32::from(TYPE_BTREE));
-    put_u32(&mut b, 120, OBJ_PHYSICAL | u32::from(TYPE_BTREE));
-    put_u32(&mut b, 124, OBJ_PHYSICAL | u32::from(TYPE_BTREE));
-    put_u64(&mut b, 128, omap);
-    put_u64(&mut b, 136, tree.root_oid);
-    b[240..256].copy_from_slice(&spec.uuid);
-    put_u64(&mut b, 256, 1_700_000_000_000_000_000);
-    put_u64(&mut b, 264, spec.fs_flags);
-    let name = spec.name.as_bytes();
-    b[704..704 + name.len()].copy_from_slice(name);
-    put_u16(&mut b, 964, spec.role);
-    seal(&mut b);
-    img.put(paddr, b);
+    img.put(paddr, superblock(live_xid, tree.root_oid));
     paddr
+}
+
+/// Object map value flag: the node has no header.
+const OMAP_NOHEADER: u32 = 0x8;
+
+/// For a sealed volume, moves the file extent records out of `records` into
+/// sealed file-extent records (key: id, logical; value: length and flags,
+/// block), sorted. Otherwise leaves them.
+fn split_extents(records: Records, sealed: bool) -> (Records, Records) {
+    use super::records::{T_FILE_EXTENT, key_header};
+    if !sealed {
+        return (records, Vec::new());
+    }
+    let (extents, rest): (Records, Records) = records
+        .into_iter()
+        .partition(|(k, _)| key_header(k).map(|h| h.1) == Some(T_FILE_EXTENT));
+    let mut fext: Records = extents
+        .into_iter()
+        .map(|(k, v)| {
+            let (id, _) = key_header(&k).unwrap();
+            let mut key = id.to_le_bytes().to_vec();
+            key.extend_from_slice(&k[8..16]);
+            (key, v[..16].to_vec())
+        })
+        .collect();
+    fext.sort_by_key(|(k, _)| {
+        (
+            u64::from_le_bytes(k[..8].try_into().unwrap()),
+            u64::from_le_bytes(k[8..16].try_into().unwrap()),
+        )
+    });
+    (rest, fext)
+}
+
+/// A snapshot of a built volume: its contents at transaction `xid`.
+#[derive(Clone)]
+pub(crate) struct SnapSpec {
+    pub name: String,
+    pub xid: u64,
+    pub fs: FsSpec,
 }
 
 /// A volume with one of each kind of item: folders, a fragmented file with
@@ -1031,5 +1185,22 @@ pub(crate) fn standard_volume(name: &str, incompatible: u64) -> VolumeSpec {
     spec.incompatible = incompatible;
     spec.fs = fs;
     spec.per_node = 6;
+    spec
+}
+
+/// The standard volume sealed, with one snapshot of an older state.
+pub(crate) fn sealed_with_snapshot() -> VolumeSpec {
+    let mut spec = standard_volume("System", 0x8);
+    spec.sealed = true;
+    spec.role = 0x1;
+    let mut then = FsSpec::new();
+    let f = then.file(2, "old.txt", &[7u8; 9000]);
+    then.item(f).fragments = 2;
+    then.folder(2, "Old folder");
+    spec.snapshots = vec![SnapSpec {
+        name: "before update".into(),
+        xid: 3,
+        fs: then,
+    }];
     spec
 }

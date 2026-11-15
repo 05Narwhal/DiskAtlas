@@ -18,7 +18,9 @@
 use std::fs;
 use std::path::Path;
 
-use super::test_container::{BS, ContainerBuilder, VolumeSpec, standard_volume};
+use super::test_container::{
+    BS, ContainerBuilder, VolumeSpec, sealed_with_snapshot, standard_volume,
+};
 
 /// Containers for the mount target.
 fn containers() -> Vec<(&'static str, Vec<u8>)> {
@@ -38,6 +40,13 @@ fn containers() -> Vec<(&'static str, Vec<u8>)> {
                     standard_volume("Macintosh HD", 0x9),
                     VolumeSpec::new("Empty"),
                 ])
+                .build()
+                .image,
+        ),
+        (
+            "apfs-sealed-with-snapshot",
+            ContainerBuilder::new()
+                .volumes(vec![sealed_with_snapshot(), standard_volume("Data", 0x9)])
                 .build()
                 .image,
         ),

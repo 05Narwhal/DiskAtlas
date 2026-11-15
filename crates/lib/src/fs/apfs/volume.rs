@@ -23,21 +23,22 @@ use std::sync::Arc;
 use super::btree::{Cursor, Layout, Tree, TreeSpec};
 use super::bytes::{array, bytes, le_u16, le_u32, le_u64, len64};
 use super::container::{Blocks, Container};
-use super::object::{OBJ_NOHEADER, TYPE_FSTREE};
+use super::object::{OBJ_NOHEADER, TYPE_FEXT_TREE, TYPE_FSTREE};
 use super::omap::{OMAP_VAL_ENCRYPTED, OMAP_VAL_NOHEADER, Omap};
 use super::records::{
     DT_DIR, DT_LNK, DT_REG, DirRec, FEXT_PREALLOCATED, FileExtent, INODE_HAS_UNCOMPRESSED_SIZE,
     Inode, T_DIR_REC, T_FILE_EXTENT, T_INODE, T_XATTR, UF_HIDDEN, XattrData, drec_name,
     finder_info, first_of, key_header, name_text, xattr_data, xattr_name,
 };
+use super::snapshot;
 use crate::error::{CorruptKind, Corruption, Error, Location, Result};
 use crate::fs::hfsplus::catalog::entry_flags;
 use crate::fs::hfsplus::compression::{self as decmpfs, DecmpfsHeader, MAX_DECMPFS_XATTR};
 use crate::fs::hfsplus::unicode::decompose;
 use crate::fs::{
     AllocationMap, DirBatch, DirEntry, DirProgress, DirStream, EntryFlags, Extent, FileSystem,
-    FinderCodes, Metadata, NodeId, NodeKind, Owner, ScanEntry, ScanSummary, Stream, Timestamp,
-    VolumeIdentity, VolumeInfo, XattrInfo,
+    FinderCodes, Metadata, NodeId, NodeKind, Owner, ScanEntry, ScanSummary, SnapshotInfo, Stream,
+    Timestamp, VolumeIdentity, VolumeInfo, XattrInfo,
 };
 use crate::io::block::{BlockSource, MemSource, check_range};
 
@@ -198,15 +199,14 @@ pub(crate) fn check_features(sb: &ApfsSuperblock) -> Result<()> {
 
 /// Everything a volume's operations share; behind an `Arc` so folder
 /// streams own it.
-#[allow(dead_code, reason = "sb, omap and xid serve snapshots, M7 task 9")]
 pub(crate) struct Core {
     pub container: Arc<Container>,
     pub blocks: Arc<Blocks>,
     pub sb: ApfsSuperblock,
     pub omap: Arc<Omap>,
-    /// The transaction virtual objects are resolved at.
-    pub xid: u64,
     fs_tree: Tree,
+    /// A sealed volume's file extents (§5.3).
+    fext_tree: Option<Tree>,
     /// Directory record keys carry a name hash.
     hashed: bool,
     case_insensitive: bool,
@@ -229,12 +229,44 @@ impl Volume {
     /// Opens the volume `sb` of `container`, resolving its objects as of
     /// transaction `xid`.
     pub(crate) fn open(container: Arc<Container>, sb: ApfsSuperblock, xid: u64) -> Result<Self> {
+        let name = sb.name.clone();
+        Self::open_at(container, sb, xid, None, name)
+    }
+
+    /// [`Self::open`] with the object map given (a snapshot shares the live
+    /// volume's) and the name to show.
+    fn open_at(
+        container: Arc<Container>,
+        sb: ApfsSuperblock,
+        xid: u64,
+        omap: Option<Arc<Omap>>,
+        name: String,
+    ) -> Result<Self> {
         check_features(&sb)?;
         if sb.encrypted() {
             return Err(Error::unsupported("encrypted volume"));
         }
         let blocks = Arc::clone(&container.blocks);
-        let omap = Arc::new(Omap::open(&blocks, sb.omap_oid)?);
+        let omap = match omap {
+            Some(omap) => omap,
+            None => Arc::new(Omap::open(&blocks, sb.omap_oid)?),
+        };
+        let fext_tree = if sb.incompatible & INCOMPAT_SEALED != 0 && sb.fext_tree_oid != 0 {
+            Some(Tree::open(
+                &blocks,
+                TreeSpec {
+                    root: sb.fext_tree_oid,
+                    root_oid: sb.fext_tree_oid,
+                    headers: sb.fext_tree_type & OBJ_NOHEADER == 0,
+                    layout: Layout::Fixed { key: 16, value: 16 },
+                    subtype: TYPE_FEXT_TREE,
+                    structure: "file-extent tree",
+                    omap: None,
+                },
+            )?)
+        } else {
+            None
+        };
         let root = omap
             .lookup(&blocks, sb.root_tree_oid, xid)?
             .ok_or_else(|| {
@@ -263,7 +295,7 @@ impl Volume {
         let insensitive =
             sb.incompatible & (INCOMPAT_CASE_INSENSITIVE | INCOMPAT_NORMALIZATION_INSENSITIVE);
 
-        let mut info = VolumeInfo::new(sb.name.clone());
+        let mut info = VolumeInfo::new(name);
         info.format = Some("APFS");
         info.total_bytes = Some(container.byte_len());
         // The space manager is read once here; a damaged one only loses this.
@@ -287,8 +319,8 @@ impl Volume {
             blocks,
             sb,
             omap,
-            xid,
             fs_tree,
+            fext_tree,
         };
         Ok(Self {
             core: Arc::new(core),
@@ -517,12 +549,33 @@ impl Core {
             .ok_or(Error::NotFound { node: id })
     }
 
-    /// The runs of the stream whose extents are keyed by `id`.
+    /// The runs of the stream whose extents are keyed by `id`: from the
+    /// sealed file-extent tree when the volume has one and it holds the
+    /// stream, else from the file-system tree (§5.3).
     fn runs(&self, id: u64) -> Result<Vec<Run>> {
-        let bs = u64::from(self.blocks.block_size);
-        let mut cursor = self.cursor(id, T_FILE_EXTENT)?;
         let mut runs = Vec::new();
         let mut end = 0u64;
+        if let Some(fext) = &self.fext_tree {
+            let mut cursor = fext.seek(Arc::clone(&self.blocks), &mut |key: &[u8]| {
+                let stored = (le_u64(key, 0), le_u64(key, 8));
+                match stored {
+                    (Some(kid), Some(logical)) => Ok((kid, logical).cmp(&(id, 0))),
+                    _ => Err(bad_record(id, "file extent key is too short")),
+                }
+            })?;
+            while let Some((key, value)) = cursor.next()? {
+                let (kid, e) = FileExtent::parse_sealed(key, value)
+                    .ok_or_else(|| bad_record(id, "file extent record is too short"))?;
+                if kid != id {
+                    break;
+                }
+                self.push_run(&mut runs, &mut end, id, e)?;
+            }
+            if !runs.is_empty() {
+                return Ok(runs);
+            }
+        }
+        let mut cursor = self.cursor(id, T_FILE_EXTENT)?;
         while let Some((key, value)) = cursor.next()? {
             let (kid, kind) = key_header(key).ok_or_else(|| bad_record(id, "key is too short"))?;
             if kid != id || kind != T_FILE_EXTENT {
@@ -530,45 +583,53 @@ impl Core {
             }
             let e = FileExtent::parse(key, value)
                 .ok_or_else(|| bad_record(id, "file extent record is too short"))?;
-            if e.len == 0 || e.len.checked_rem(bs) != Some(0) || e.logical < end {
-                return Err(bad_record(id, "file extent length or order is invalid"));
-            }
-            let zeros = e.paddr == 0 || e.flags & FEXT_PREALLOCATED != 0;
-            if !zeros {
-                let inside = e
-                    .paddr
-                    .checked_add(e.len.checked_div(bs).unwrap_or(0))
-                    .is_some_and(|last| last <= self.blocks.block_count);
-                if !inside {
-                    return Err(corrupt(
-                        "file-system tree",
-                        Location::Object(id),
-                        CorruptKind::OutOfRange {
-                            field: "file extent block",
-                            value: e.paddr,
-                            limit_name: "container blocks",
-                            limit: self.blocks.block_count,
-                        },
-                    ));
-                }
-            }
-            end = e
-                .logical
-                .checked_add(e.len)
-                .ok_or_else(|| bad_record(id, "file extent end overflows"))?;
-            if runs.len() >= MAX_EXTENTS {
-                return Err(Error::unsupported(format!(
-                    "a stream of more than {MAX_EXTENTS} extents"
-                )));
-            }
-            runs.push(Run {
-                logical: e.logical,
-                len: e.len,
-                paddr: e.paddr,
-                zeros,
-            });
+            self.push_run(&mut runs, &mut end, id, e)?;
         }
         Ok(runs)
+    }
+
+    /// Checks one extent of stream `id` against the ones before it (ending
+    /// at `end`) and the container, then appends it.
+    fn push_run(&self, runs: &mut Vec<Run>, end: &mut u64, id: u64, e: FileExtent) -> Result<()> {
+        let bs = u64::from(self.blocks.block_size);
+        if e.len == 0 || e.len.checked_rem(bs) != Some(0) || e.logical < *end {
+            return Err(bad_record(id, "file extent length or order is invalid"));
+        }
+        let zeros = e.paddr == 0 || e.flags & FEXT_PREALLOCATED != 0;
+        if !zeros {
+            let inside = e
+                .paddr
+                .checked_add(e.len.checked_div(bs).unwrap_or(0))
+                .is_some_and(|last| last <= self.blocks.block_count);
+            if !inside {
+                return Err(corrupt(
+                    "file-system tree",
+                    Location::Object(id),
+                    CorruptKind::OutOfRange {
+                        field: "file extent block",
+                        value: e.paddr,
+                        limit_name: "container blocks",
+                        limit: self.blocks.block_count,
+                    },
+                ));
+            }
+        }
+        *end = e
+            .logical
+            .checked_add(e.len)
+            .ok_or_else(|| bad_record(id, "file extent end overflows"))?;
+        if runs.len() >= MAX_EXTENTS {
+            return Err(Error::unsupported(format!(
+                "a stream of more than {MAX_EXTENTS} extents"
+            )));
+        }
+        runs.push(Run {
+            logical: e.logical,
+            len: e.len,
+            paddr: e.paddr,
+            zeros,
+        });
+        Ok(())
     }
 
     /// A readable source for an attribute value.
@@ -1009,6 +1070,32 @@ impl FileSystem for Volume {
 
     fn scan(&self, visit: &mut dyn FnMut(ScanEntry<'_>) -> ControlFlow<()>) -> Result<ScanSummary> {
         scan(&self.core, visit)
+    }
+
+    fn snapshots(&self) -> Result<Vec<SnapshotInfo>> {
+        Ok(snapshot::list(&self.core.container, &self.core.sb)?
+            .iter()
+            .map(snapshot::SnapRecord::info)
+            .collect())
+    }
+
+    /// The volume at snapshot `id` (its xid): the superblock stored with the
+    /// snapshot, read through this volume's object map at that transaction.
+    fn open_snapshot(&self, id: u64) -> Result<Arc<dyn FileSystem>> {
+        let container = &self.core.container;
+        let record = snapshot::find(container, &self.core.sb, id)?;
+        let sb = snapshot::superblock(container, &record)?;
+        if sb.incompatible & INCOMPAT_DATALESS_SNAPS != 0 {
+            return Err(Error::unsupported("a snapshot that holds no data"));
+        }
+        let name = format!("{} \u{2014} {}", self.info.name, record.name);
+        Ok(Arc::new(Self::open_at(
+            Arc::clone(container),
+            sb,
+            record.xid,
+            Some(Arc::clone(&self.core.omap)),
+            name,
+        )?))
     }
 
     fn identity(&self) -> Option<VolumeIdentity> {

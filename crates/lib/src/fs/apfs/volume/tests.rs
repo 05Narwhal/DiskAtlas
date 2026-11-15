@@ -448,3 +448,129 @@ fn the_standard_seed_volume_mounts_and_reads() {
         assert_eq!(count, 19);
     }
 }
+
+/// Every (path, content) of a volume, by walking it.
+fn contents(fs: &dyn FileSystem) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut queue = vec![(2u64, String::new())];
+    while let Some((dir, path)) = queue.pop() {
+        for (name, id, kind, _) in list(fs, dir) {
+            let path = format!("{path}/{name}");
+            match kind {
+                NodeKind::Directory => queue.push((id, path)),
+                _ => {
+                    let data = read_all(&*fs.open(NodeId(id), Stream::Data).unwrap());
+                    out.insert(path, data);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn sealed_volumes_read_extents_from_their_own_tree() {
+    use crate::fs::apfs::test_container::standard_volume;
+    let plain = one(standard_volume("Plain", 0x8));
+    let mut spec = standard_volume("Sealed", 0x8);
+    spec.sealed = true;
+    let built = build(vec![spec]);
+    // The file-system tree really is stored without headers.
+    let image = &built.image;
+    let vols = ready(image.clone());
+    let sealed = vols[0].as_ref().unwrap();
+    assert_eq!(contents(&**sealed), contents(&*plain));
+    let headerless = image
+        .chunks(4096)
+        .filter(|b| {
+            b[..32].iter().all(|&x| x == 0) && u16::from_le_bytes([b[32], b[33]]) & 0x10 != 0
+        })
+        .count();
+    assert!(
+        headerless >= 2,
+        "no-header nodes in the image: {headerless}"
+    );
+}
+
+#[test]
+fn snapshots_list_and_open_at_their_transaction() {
+    use crate::fs::apfs::test_container::SnapSpec;
+    // Then: "kept" with old content and "gone". Now: "kept" changed, "new".
+    let mut then = FsSpec::new();
+    then.file(2, "kept", b"old content");
+    then.file(2, "gone", b"deleted since");
+    let mut now = FsSpec::new();
+    now.file(2, "kept", b"new content, longer");
+    now.file(2, "new", b"added since");
+    let mut spec = VolumeSpec::new("Data");
+    spec.fs = now;
+    spec.snapshots = vec![SnapSpec {
+        name: "com.apple.TimeMachine.2026-11-01".into(),
+        xid: 3,
+        fs: then,
+    }];
+    let live = one(spec);
+    let snaps = live.snapshots().unwrap();
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].id, 3);
+    assert_eq!(snaps[0].name, "com.apple.TimeMachine.2026-11-01");
+    assert!(snaps[0].created.is_some());
+
+    let old = live.open_snapshot(3).unwrap();
+    assert_eq!(
+        old.info().name,
+        "Data \u{2014} com.apple.TimeMachine.2026-11-01"
+    );
+    assert_ne!(
+        old.identity().unwrap().change,
+        live.identity().unwrap().change
+    );
+    let want_old = BTreeMap::from([
+        ("/gone".to_owned(), b"deleted since".to_vec()),
+        ("/kept".to_owned(), b"old content".to_vec()),
+    ]);
+    let want_now = BTreeMap::from([
+        ("/kept".to_owned(), b"new content, longer".to_vec()),
+        ("/new".to_owned(), b"added since".to_vec()),
+    ]);
+    assert_eq!(contents(&*old), want_old);
+    assert_eq!(contents(&*live), want_now);
+    assert!(matches!(live.open_snapshot(4), Err(Error::NotFound { .. })));
+    // A volume without snapshots lists none.
+    assert!(one(VolumeSpec::new("v")).snapshots().unwrap().is_empty());
+}
+
+#[test]
+fn damage_to_a_sealed_volume_or_its_snapshot_never_panics() {
+    use crate::fs::apfs::test_container::sealed_with_snapshot;
+    let built = build(vec![sealed_with_snapshot()]);
+    let vols = ready(built.image.clone());
+    let fs = vols[0].as_ref().unwrap();
+    assert_eq!(fs.snapshots().unwrap().len(), 1);
+    assert_eq!(contents(&*fs.open_snapshot(3).unwrap()).len(), 1);
+    for paddr in 0..(built.image.len() / 4096) as u64 {
+        let mut image = built.image.clone();
+        corrupt_block(&mut image, paddr, 4096);
+        let Ok(vols) = mount(Arc::new(MemSource::new(image))) else {
+            continue;
+        };
+        for v in vols {
+            let VolumeState::Ready(fs) = v.state else {
+                continue;
+            };
+            let mut views = vec![Arc::clone(&fs)];
+            if let Ok(snap) = fs.open_snapshot(3) {
+                views.push(snap);
+            }
+            for view in views {
+                let _ = view.scan(&mut |e| {
+                    if let Ok(src) = view.open(e.node, Stream::Data) {
+                        let mut buf = vec![0u8; usize::try_from(src.len().min(40_000)).unwrap()];
+                        let _ = src.read_at(0, &mut buf);
+                    }
+                    ControlFlow::Continue(())
+                });
+            }
+        }
+    }
+}

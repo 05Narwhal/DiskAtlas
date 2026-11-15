@@ -29,7 +29,6 @@ pub(crate) const OBJ_ID_MASK: u64 = 0x0FFF_FFFF_FFFF_FFFF;
 const TYPE_SHIFT: u32 = 60;
 
 /// Record types.
-#[allow(dead_code, reason = "snapshots, M7 task 9")]
 pub(crate) const T_SNAP_METADATA: u8 = 1;
 pub(crate) const T_INODE: u8 = 3;
 pub(crate) const T_XATTR: u8 = 4;
@@ -87,20 +86,6 @@ pub(crate) fn first_of(id: u64, kind: u8) -> impl FnMut(&[u8]) -> Result<Orderin
     move |key: &[u8]| {
         let (kid, ktype) = key_header(key).ok_or_else(short_key)?;
         Ok((kid, ktype).cmp(&(id, kind)).then(Ordering::Greater))
-    }
-}
-
-/// Orders a file-extent key against (object `id`, logical address `at`).
-#[allow(dead_code, reason = "sealed volumes, M7 task 9")]
-pub(crate) fn extent_at(id: u64, at: u64) -> impl FnMut(&[u8]) -> Result<Ordering> {
-    move |key: &[u8]| {
-        let (kid, ktype) = key_header(key).ok_or_else(short_key)?;
-        let header = (kid, ktype).cmp(&(id, T_FILE_EXTENT));
-        if header != Ordering::Equal {
-            return Ok(header);
-        }
-        let logical = le_u64(key, 8).ok_or_else(short_key)?;
-        Ok(logical.cmp(&at))
     }
 }
 
@@ -333,7 +318,6 @@ impl FileExtent {
 
     /// From a sealed volume's file-extent tree record: key (private id,
     /// logical address), value (length and flags, physical block).
-    #[allow(dead_code, reason = "sealed volumes, M7 task 9")]
     pub fn parse_sealed(key: &[u8], value: &[u8]) -> Option<(u64, Self)> {
         let len_and_flags = le_u64(value, 0)?;
         Some((
@@ -564,10 +548,6 @@ mod tests {
         assert_eq!(cmp(&inode_key(2)).unwrap(), Ordering::Less);
         assert_eq!(cmp(&inode_key(3)).unwrap(), Ordering::Greater);
         assert!(cmp(&[1, 2, 3]).is_err());
-        let mut at = extent_at(5, 8192);
-        assert_eq!(at(&extent_key(5, 4096)).unwrap(), Ordering::Less);
-        assert_eq!(at(&extent_key(5, 8192)).unwrap(), Ordering::Equal);
-        assert_eq!(at(&extent_key(6, 0)).unwrap(), Ordering::Greater);
     }
 
     #[test]

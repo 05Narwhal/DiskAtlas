@@ -54,12 +54,10 @@ pub(crate) const TYPE_FS: u16 = 0xD;
 /// File-system tree (a B-tree subtype).
 pub(crate) const TYPE_FSTREE: u16 = 0xE;
 /// Snapshot metadata tree (a B-tree subtype).
-#[allow(dead_code, reason = "snapshots, M7 task 9")]
 pub(crate) const TYPE_SNAPMETATREE: u16 = 0x10;
 /// Object map tree (a B-tree subtype).
 pub(crate) const TYPE_OMAP_TREE: u16 = 0xB;
 /// Sealed-volume file-extent tree (a B-tree subtype).
-#[allow(dead_code, reason = "sealed volumes, M7 task 9")]
 pub(crate) const TYPE_FEXT_TREE: u16 = 0x1F;
 
 /// `2^32 - 1`, the Fletcher-64 modulus.
