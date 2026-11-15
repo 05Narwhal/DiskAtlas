@@ -16,10 +16,12 @@
 //! Mac (and other operating systems') housekeeping conventions. Pure
 //! functions, apart from [`read_hidden_list`], which reads one small file.
 
+pub mod alias;
 pub mod appledouble;
 pub mod bplist;
 pub mod bundle;
 pub mod conventions;
+pub mod resource_map;
 pub mod sidecar_fs;
 pub mod trash;
 pub mod xattr;

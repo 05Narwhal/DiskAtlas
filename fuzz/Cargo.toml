@@ -138,3 +138,17 @@ path = "fuzz_targets/trash_info.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "resource_map"
+path = "fuzz_targets/resource_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "alias_record"
+path = "fuzz_targets/alias_record.rs"
+test = false
+doc = false
+bench = false
