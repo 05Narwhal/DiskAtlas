@@ -236,7 +236,7 @@ pub struct FileRow {
 impl FileRow {
     /// The row for `row` at list `position`; `resource_column` says whether the list shows the
     /// Resource fork column.
-    pub fn new(row: &Row<'_>, position: usize, resource_column: bool) -> Self {
+    pub fn new(row: &Row<'_>, position: usize, resource_column: bool, local_times: bool) -> Self {
         let entry = &row.entry;
         let browsable = entry.is_browsable();
         Self {
@@ -245,7 +245,7 @@ impl FileRow {
             folder: None,
             modified: entry
                 .modified
-                .map(|time| SharedString::from(format::date_time(time))),
+                .map(|time| SharedString::from(format::date_time_on(time, local_times))),
             size: if browsable {
                 size_text(row.size)
             } else {

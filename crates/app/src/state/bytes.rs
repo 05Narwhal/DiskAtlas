@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use disk_atlas_lib::fs::hfs::encoding::Encoding;
 use disk_atlas_lib::fs::Timestamp;
 use disk_atlas_lib::io::block::BlockSource;
 
@@ -580,7 +581,6 @@ pub enum TextColumn {
     #[default]
     Ascii,
     /// The stream is treated as Mac OS Roman (an HFS volume, or a `TEXT` file).
-    #[allow(dead_code)] // Built by the M6 volume formats, with the Roman table in `text_char`.
     MacRoman,
 }
 
@@ -588,11 +588,17 @@ pub enum TextColumn {
 pub fn text_char(byte: u8, column: TextColumn) -> char {
     match (byte, column) {
         (0x20..=0x7E, _) => char::from(byte),
-        // TODO(M6): Mac OS Roman's own characters for 0x80..=0xFF, from the M6 table in
-        // `disk_atlas_lib::mac`. Until it lands they show as `.`, like any other byte; the
-        // preview's text provider waits on the same table.
-        (_, TextColumn::MacRoman) => '.',
-        (_, TextColumn::Ascii) => '.',
+        // The high half is Mac OS Roman's own characters; a byte the table leaves undefined
+        // shows as `.` like the control codes.
+        (0x80..=0xFF, TextColumn::MacRoman) => {
+            let mut text = String::new();
+            Encoding::Roman.decode_into(&[byte], &mut text);
+            text.chars()
+                .next()
+                .filter(|&c| c != '\u{FFFD}')
+                .unwrap_or('.')
+        }
+        _ => '.',
     }
 }
 
@@ -1303,16 +1309,18 @@ mod tests {
         assert_eq!(text_char(0x7F, TextColumn::Ascii), '.');
         assert_eq!(text_char(0x00, TextColumn::Ascii), '.');
         assert_eq!(text_char(0xA9, TextColumn::Ascii), '.');
-        // Mac OS Roman agrees with ASCII below 0x80; above it waits for the M6 table.
+        // Mac OS Roman agrees with ASCII below 0x80 and has its own characters above it.
         assert_eq!(text_char(b'z', TextColumn::MacRoman), 'z');
         assert_eq!(text_char(0x0D, TextColumn::MacRoman), '.');
-        assert_eq!(text_char(0xA5, TextColumn::MacRoman), '.');
+        assert_eq!(text_char(0xA5, TextColumn::MacRoman), '\u{2022}');
+        assert_eq!(text_char(0xF0, TextColumn::MacRoman), '\u{F8FF}');
         let mut text = String::new();
         let mut starts = [0; 17];
-        write_text_row(b"Hi\x80!", TextColumn::MacRoman, &mut text, &mut starts);
-        assert_eq!(text, "Hi.!");
-        assert_eq!(&starts[..5], &[0, 1, 2, 3, 4]);
-        assert!(starts[5..].iter().all(|&s| s == 4));
+        write_text_row(b"Hi\x8E!", TextColumn::MacRoman, &mut text, &mut starts);
+        assert_eq!(text, "Hi\u{E9}!");
+        // Offsets are UTF-8 byte positions: é takes two.
+        assert_eq!(&starts[..5], &[0, 1, 2, 4, 5]);
+        assert!(starts[5..].iter().all(|&s| s == 5));
     }
 
     #[test]

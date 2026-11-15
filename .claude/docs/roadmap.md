@@ -178,7 +178,7 @@ Design: `design/m6-hfs.md`.
 - [x] O: MDB, catalog and extents on the shared B-tree reader. (Tasks 2 to 6 of `m6-hfs.md` §7 done in `lane-c-m6`, merged into `dev` 2026-11-15, with fuzz targets `hfs_mount`, `hfs_records`, `dc42`; not yet run.)
 - [x] S: Mac OS Roman and other script encodings.
 - [x] S: DiskCopy 4.2 images.
-- [ ] S: Task 7, the app: `local_times` in `format.rs`, Mac OS Roman in the text preview and the bytes view's text column. Lane C, first.
+- [x] S: Task 7, the app: `local_times` in `format.rs`, Mac OS Roman in the text preview and the bytes view's text column. Done: the list, Properties and Quick Look show stored dates on `local_times` volumes; HFS volumes and TEXT files read as Mac OS Roman in the preview and bytes text column.
 
 ## M7. APFS, read-only
 

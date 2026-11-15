@@ -566,6 +566,7 @@ pub struct Listing {
     location: Option<Location>,
     /// Whether the volume of `location` has resource forks, read once per navigation.
     resource_forks: bool,
+    local_times: bool,
     /// What mounting did with the volume's journal, read once per navigation.
     journal: Option<JournalState>,
     /// True when the source of `location` is the host: ids in its search index are scan-local.
@@ -649,6 +650,7 @@ impl Listing {
             sources,
             location: None,
             resource_forks: false,
+            local_times: false,
             journal: None,
             host: false,
             hit_epoch: 0,
@@ -702,6 +704,11 @@ impl Listing {
     /// True when the volume shown has resource forks: the list gets a Resource fork column.
     pub fn resource_forks(&self) -> bool {
         self.resource_forks
+    }
+
+    /// Whether the volume's dates carry no time zone and are shown as stored.
+    pub fn local_times(&self) -> bool {
+        self.local_times
     }
 
     /// What mounting did with the journal of the volume shown, when the format has one.
@@ -1668,6 +1675,7 @@ impl Listing {
         // render path reads the cached values.
         let info = self.location.as_ref().map(|location| location.fs().info());
         self.resource_forks = info.as_ref().is_some_and(|info| info.resource_forks);
+        self.local_times = info.as_ref().is_some_and(|info| info.local_times);
         self.journal = info.and_then(|info| info.journal);
         // A sort by a column this volume does not have would be invisible: go back to the default.
         if !self.resource_forks && self.shown.sort.column == SortColumn::ResourceFork {

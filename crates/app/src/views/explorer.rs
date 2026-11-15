@@ -937,7 +937,7 @@ impl Explorer {
                         .hover_paint
                         .and_then(|(at, amount)| (at == position).then_some(amount));
                     let under_plate = self.glide_paint.is_some_and(|(to, _)| to == position);
-                    let mut file_row = FileRow::new(&row, position, resource_column)
+                    let mut file_row = FileRow::new(&row, position, resource_column, listing.local_times())
                         .system(listing.system_of(&row))
                         .hover(hover)
                         .under_plate(under_plate);
