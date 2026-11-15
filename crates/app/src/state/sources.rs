@@ -35,6 +35,7 @@ use disk_atlas_lib::image;
 use disk_atlas_lib::io::block::{BlockSource, Slice};
 use disk_atlas_lib::io::cache::{CachedSource, ChunkCache, DEFAULT_BUDGET};
 use disk_atlas_lib::io::device::{self, DeviceInfo, HostVolume};
+use disk_atlas_lib::mac::sidecar_fs::SidecarFs;
 use disk_atlas_lib::partition::{self, Guid, Partition, PartitionType, Scheme, TypeHint};
 use gpui::{Context, EventEmitter, SharedString, Task};
 
@@ -861,6 +862,10 @@ impl Sources {
         self.next_disk = self.next_disk.saturating_add(1);
         let label = SharedString::from(found.label);
 
+        // The setting is read when the disk is added: a change applies to disks opened after it.
+        let merge_sidecars = cx
+            .try_global::<crate::state::settings::Settings>()
+            .is_none_or(|settings| settings.bool_of("merge_sidecars"));
         let mut volume_ids = Vec::with_capacity(volumes.len());
         for PreparedVolume {
             plan,
@@ -873,7 +878,16 @@ impl Sources {
             self.items.push(Source {
                 id,
                 group: found.group,
-                fs: fs.unwrap_or_else(|| Unavailable::arc(&plan.label)),
+                fs: fs.map_or_else(
+                    || Unavailable::arc(&plan.label),
+                    |fs| {
+                        if merge_sidecars {
+                            SidecarFs::wrap(fs)
+                        } else {
+                            fs
+                        }
+                    },
+                ),
                 label: SharedString::from(plan.label),
                 format: Some(SharedString::from(plan.format)),
                 kind: SourceKind::Volume {

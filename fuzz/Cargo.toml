@@ -117,3 +117,10 @@ path = "fuzz_targets/hfs_records.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "appledouble"
+path = "fuzz_targets/appledouble.rs"
+test = false
+doc = false
+bench = false

@@ -16,6 +16,9 @@
 //! Mac (and other operating systems') housekeeping conventions. Pure
 //! functions, apart from [`read_hidden_list`], which reads one small file.
 
+pub mod appledouble;
 pub mod conventions;
+pub mod sidecar_fs;
+pub(crate) mod util;
 
 pub use conventions::{SystemItem, parse_hidden_list, read_hidden_list, system_item};
