@@ -431,6 +431,22 @@ impl DsStore {
     }
 }
 
+/// Reads and parses the `.DS_Store` of the folder `dir`. `None` when there is none, it is too
+/// large or it is damaged: the notes are advisory.
+pub fn read_store(fs: &dyn crate::fs::FileSystem, dir: crate::fs::NodeId) -> Option<DsStore> {
+    let node = fs.lookup(dir, ".DS_Store").ok()??;
+    if fs.metadata(node).ok()?.kind != crate::fs::NodeKind::File {
+        return None;
+    }
+    let source = fs.open(node, crate::fs::Stream::Data).ok()?;
+    if source.len() > MAX_DS_STORE as u64 {
+        return None;
+    }
+    let mut bytes = vec![0u8; to_usize(source.len())];
+    source.read_at(0, &mut bytes).ok()?;
+    DsStore::parse(&bytes).ok()
+}
+
 /// `len` bytes at offset `offset` (from byte 4) of `bytes`.
 fn slice_at(bytes: &[u8], offset: u32, len: usize) -> Result<&[u8]> {
     let start = to_usize(u64::from(offset)).saturating_add(4);

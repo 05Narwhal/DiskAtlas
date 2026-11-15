@@ -1569,8 +1569,14 @@ impl Properties {
         }
         if !host {
             let fs = Arc::clone(&fs);
+            let (dir, item_name) = (parent, name.to_string());
             self.spawn_section(cx, SectionId::Xattrs, move || {
-                let mac = read_attributes(fs.as_ref(), node);
+                let mut mac = read_attributes(fs.as_ref(), node);
+                // The Finder keeps comments in the folder's `.DS_Store` as well.
+                if mac.comment.is_none() {
+                    mac.comment = disk_atlas_lib::mac::ds_store::read_store(fs.as_ref(), dir)
+                        .and_then(|store| store.comment(&item_name).map(str::to_owned));
+                }
                 xattrs_with_mac(
                     &mac,
                     &fs.xattrs(node)
