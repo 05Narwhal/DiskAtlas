@@ -1583,7 +1583,6 @@ mod tests {
         }
         for content in [
             Content::Apfs,
-            Content::Hfs,
             Content::Ntfs,
             Content::Empty,
             Content::Unknown,

@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::fs::{FileSystem, hfsplus};
+use crate::fs::{FileSystem, hfs, hfsplus};
 use crate::io::block::BlockSource;
 
 /// How many bytes from the start of a source the probes see. ISO 9660's
@@ -293,8 +293,8 @@ pub fn mount(source: Arc<dyn BlockSource>, content: Content) -> Result<Option<Mo
         Content::HfsPlus | Content::Hfsx | Content::HfsWrapped => {
             Ok(Some(Mount::Volume(Arc::new(hfsplus::mount(source)?))))
         }
+        Content::Hfs => Ok(Some(Mount::Volume(Arc::new(hfs::mount(source)?)))),
         Content::Apfs
-        | Content::Hfs
         | Content::Mfs
         | Content::CoreStorage
         | Content::Ntfs
