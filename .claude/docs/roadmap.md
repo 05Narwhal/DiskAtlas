@@ -185,7 +185,7 @@ Design: `design/m6-hfs.md`.
 Design: `design/m7-apfs.md`.
 
 - [x] F: Design for containers, checkpoints, object maps and snapshots. `design/m7-apfs.md`, with every layout table checked on 2026-11-12 against a second source and five additions (no-header trees on sealed volumes, hashed index values, preallocated extents, three newer feature bits, key blob contents). The engine API for it is built: `probe::Mount`, `ContainerVolume`, `VolumeRole`, `VolumeState`, `LockedVolume`, `FileSystem::snapshots` and `open_snapshot`, `Error::WrongPassword`; `probe::mount` now returns `Mount` and the app matches `Mount::Volume`.
-- [ ] O: Container superblock selection and object map lookups.
+- [x] O: Container superblock selection and object map lookups. Built in lane B (2026-11-15): checkpoint selection with fallback to block 0, B-tree node view, cache and cursor, object map lookups at a transaction, the in-memory container builder, fuzz targets `apfs_mount` and `apfs_btree_node`. Left: the volume tree (next line).
 - [ ] O: Volume file-system tree: listing, metadata, extents, attributes.
 - [ ] O: Snapshots and multi-volume containers.
 - [ ] O: Password unlock for software-encrypted volumes. Fable's half is done: the brief is `design/m7-apfs.md` §9.5. Needs Julian's yes to the four crypto crates and his encrypted fixture image.
