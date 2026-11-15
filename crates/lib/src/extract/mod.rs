@@ -44,6 +44,7 @@ use crate::fs::{
     NodeKind, Stream, Timestamp,
 };
 use crate::io::block::BlockSource;
+use crate::mac::{read_hidden_list, system_item};
 
 use names::{NameSet, sanitize};
 
@@ -121,9 +122,15 @@ impl HostRules {
 pub struct CopyOptions {
     /// Write AppleDouble sidecars for resource forks and Finder information.
     pub forks: bool,
-    /// Copy entries flagged [`EntryFlags::HIDDEN`]. Selected top-level
-    /// items are always copied.
+    /// Copy entries flagged [`EntryFlags::HIDDEN`], and the names the
+    /// volume root's `.hidden` file lists (in the root only). Selected
+    /// top-level items are always copied.
     pub hidden: bool,
+    /// Copy housekeeping items ([`system_item`]: `.DS_Store`, `._name`,
+    /// `__MACOSX`, a root `.Spotlight-V100`, ...) found inside a folder
+    /// being copied; a folder left behind is not entered. Selected
+    /// top-level items are always copied. Default off.
+    pub copy_system_items: bool,
     /// The naming rules. The host's own rules are applied on top, so a name
     /// is always legal where it is written.
     pub rules: HostRules,
@@ -134,6 +141,7 @@ impl Default for CopyOptions {
         Self {
             forks: false,
             hidden: true,
+            copy_system_items: false,
             rules: HostRules::current(),
         }
     }
@@ -152,8 +160,12 @@ pub enum Skip {
     ForkTooLarge,
     /// A folder deeper than [`MAX_DEPTH`].
     TooDeep,
-    /// An entry flagged hidden, with [`CopyOptions::hidden`] off.
+    /// An entry flagged hidden, or listed in the root's `.hidden`, with
+    /// [`CopyOptions::hidden`] off.
     Hidden,
+    /// A housekeeping item, with [`CopyOptions::copy_system_items`] off. A
+    /// folder is left behind whole; what is inside it is not reported.
+    System,
 }
 
 /// Progress reported by [`copy_out`].
@@ -211,8 +223,11 @@ pub struct CopySummary {
     /// Symbolic links left out.
     pub skipped_links: u64,
     /// Everything else left out: special files, hidden entries, folders too
-    /// deep, sidecars whose fork is too long.
+    /// deep, sidecars whose fork is too long. Not housekeeping items.
     pub skipped_other: u64,
+    /// Housekeeping items left behind ([`Skip::System`]); a folder counts
+    /// once, whatever it holds.
+    pub skipped_system: u64,
     /// Names changed to be legal or unique on the host.
     pub renamed: u64,
     /// The job was cancelled.
@@ -228,7 +243,9 @@ pub struct CopySummary {
 ///
 /// Folders are copied with everything in them, files whole or not at all,
 /// and nothing on the host is overwritten: a name already in use becomes
-/// `name (2)`. Symbolic links and special files are skipped. A file or
+/// `name (2)`. Symbolic links and special files are skipped; inside the
+/// folders copied, hidden entries and housekeeping items follow
+/// [`CopyOptions::hidden`] and [`CopyOptions::copy_system_items`]. A file or
 /// folder that cannot be read is reported through `events` and counted, and
 /// the copy goes on. `cancel` is checked before each entry and after each
 /// MiB written; a cancelled job removes the file it was writing and returns
@@ -265,6 +282,8 @@ pub fn copy_out(
         summary: CopySummary::default(),
         reported: 0,
         visits: HashMap::new(),
+        root: fs.root(),
+        hidden_names: None,
     };
     for item in items {
         let flow = job.check_cancel().and_then(|()| job.item(item, &mut names));
@@ -358,6 +377,12 @@ struct Job<'a> {
     /// How many times each folder was entered in this job, for
     /// [`MAX_FOLDER_VISITS`].
     visits: HashMap<NodeId, u32>,
+    /// The volume root: its children are "at the root" for
+    /// [`system_item`] and the `.hidden` list.
+    root: NodeId,
+    /// The names of the root's `.hidden` file, read the first time the root
+    /// is listed with [`CopyOptions::hidden`] off; `None` until then.
+    hidden_names: Option<HashSet<String>>,
 }
 
 impl Job<'_> {
@@ -456,15 +481,21 @@ impl Job<'_> {
                 } => (node, host, vol, depth, modified, created),
             };
             on_path.insert(node);
+            // The root can only be walked as a selected item: reached again
+            // from inside itself, it is already on the path.
+            let at_root = node == self.root;
+            if at_root && !self.options.hidden && self.hidden_names.is_none() {
+                self.hidden_names = Some(read_hidden_list(self.fs).into_iter().collect());
+            }
             batch.clear();
             self.list(node, &folder_vol, &mut batch);
             let mut names = NameSet::new();
 
-            // Files first.
+            // Files first. Every entry left out is reported here, once.
             for entry in batch.iter() {
                 self.check_cancel()?;
                 volume_path(&mut vol, &folder_vol, entry.name);
-                if !self.wanted(&entry, &vol) {
+                if !self.wanted(&entry, &vol, at_root) {
                     continue;
                 }
                 match entry.kind {
@@ -480,7 +511,7 @@ impl Job<'_> {
             // Then the subfolders: created now, filled after this folder.
             children.clear();
             for entry in batch.iter() {
-                if entry.kind != NodeKind::Directory || !self.hidden_ok(&entry) {
+                if entry.kind != NodeKind::Directory || self.left_out(&entry, at_root).is_some() {
                     continue;
                 }
                 self.check_cancel()?;
@@ -602,18 +633,38 @@ impl Job<'_> {
         }
     }
 
-    /// False, with the skip reported, for a hidden entry the options leave out.
-    fn wanted(&mut self, entry: &DirEntry<'_>, vol: &str) -> bool {
-        if self.hidden_ok(entry) {
-            true
-        } else {
-            self.skip(vol, Skip::Hidden);
-            false
+    /// False, with the skip reported, for an entry the options leave out.
+    fn wanted(&mut self, entry: &DirEntry<'_>, vol: &str, at_root: bool) -> bool {
+        match self.left_out(entry, at_root) {
+            None => true,
+            Some(why) => {
+                self.skip(vol, why);
+                false
+            }
         }
     }
 
-    fn hidden_ok(&self, entry: &DirEntry<'_>) -> bool {
-        self.options.hidden || !entry.flags.contains(EntryFlags::HIDDEN)
+    /// Why a listed entry stays behind, if it does: hidden first, then
+    /// housekeeping. `at_root` when it is a child of the volume root.
+    /// Selected top-level items never come here.
+    fn left_out(&self, entry: &DirEntry<'_>, at_root: bool) -> Option<Skip> {
+        let flagged = entry.flags.contains(EntryFlags::HIDDEN);
+        if !self.options.hidden {
+            let listed = at_root
+                && self
+                    .hidden_names
+                    .as_ref()
+                    .is_some_and(|names| names.contains(entry.name));
+            if flagged || listed {
+                return Some(Skip::Hidden);
+            }
+        }
+        if !self.options.copy_system_items
+            && system_item(entry.name, entry.kind, at_root, flagged).is_some()
+        {
+            return Some(Skip::System);
+        }
+        None
     }
 
     /// Copies one file into `dir`, then its sidecar when forks are on.
@@ -965,6 +1016,9 @@ impl Job<'_> {
             Skip::Special | Skip::ForkTooLarge | Skip::TooDeep | Skip::Hidden => {
                 self.summary.skipped_other = self.summary.skipped_other.saturating_add(1);
             }
+            Skip::System => {
+                self.summary.skipped_system = self.summary.skipped_system.saturating_add(1);
+            }
         }
         (self.events)(CopyEvent::Skipped { path: vol, why });
     }
@@ -1250,6 +1304,8 @@ mod tests {
         nodes: HashMap<u64, MockNode>,
         /// (folder, n): listing the folder fails after n entries.
         fail_listing: Option<(u64, usize)>,
+        /// Calls to `lookup`.
+        lookups: AtomicUsize,
     }
 
     impl Mock {
@@ -1259,6 +1315,7 @@ mod tests {
             Self {
                 nodes,
                 fail_listing: None,
+                lookups: AtomicUsize::new(0),
             }
         }
 
@@ -1359,8 +1416,15 @@ mod tests {
             })
         }
 
-        fn lookup(&self, _dir: NodeId, _name: &str) -> Result<Option<NodeId>> {
-            Ok(None)
+        fn lookup(&self, dir: NodeId, name: &str) -> Result<Option<NodeId>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            let MockKind::Dir(children) = &self.get(dir)?.kind else {
+                return Err(Error::NotADirectory { node: dir.0 });
+            };
+            Ok(children
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|&(_, id)| NodeId(id)))
         }
 
         fn read_dir(&self, dir: NodeId) -> Result<Box<dyn DirStream>> {
@@ -1672,6 +1736,7 @@ mod tests {
             let options = CopyOptions {
                 forks: false,
                 hidden: true,
+                copy_system_items: false,
                 rules,
             };
             let (result, _) = run(&fs, &items, &dest, &options);
@@ -1961,6 +2026,201 @@ mod tests {
         assert_eq!(summary.created.len(), 1);
     }
 
+    /// A volume with housekeeping items at the root and below it.
+    fn housekeeping_volume() -> Mock {
+        let mut fs = Mock::new();
+        fs.file(1, ".DS_Store", 2, b"ds")
+            .file(1, "._x", 3, b"ad")
+            .dir(1, "__MACOSX", 4)
+            .file(4, "._a", 5, b"ad")
+            .dir(4, "sub", 6)
+            .file(6, "f", 7, b"f")
+            .file(1, "Icon\r", 8, b"")
+            .dir(1, ".Spotlight-V100", 9)
+            .dir(9, "Store-V2", 10)
+            .file(10, "db", 11, b"db")
+            // A user's own folder: classic `Trash` counts only when hidden.
+            .dir(1, "Trash", 12)
+            .file(12, "mine.txt", 13, b"mine")
+            .file(1, "keep.txt", 14, b"keep")
+            .dir(1, "Docs", 15)
+            .file(15, ".DS_Store", 16, b"ds")
+            .file(15, "a.txt", 17, b"a")
+            // Root-only names below the root are ordinary.
+            .dir(15, ".Spotlight-V100", 18)
+            .file(18, "x", 19, b"x")
+            .file(1, "Desktop DB", 20, b"db")
+            .with(20, |n| n.flags = EntryFlags::HIDDEN);
+        fs
+    }
+
+    #[test]
+    fn housekeeping_items_stay_behind_by_default() {
+        let fs = housekeeping_volume();
+        let temp = Temp::new("system");
+        let (result, log) = run(&fs, &[item(1, "Vol")], &temp.0, &options(false));
+        let summary = result.unwrap();
+        let keys: Vec<String> = tree(&temp.0).into_keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "Vol",
+                "Vol/Docs",
+                "Vol/Docs/.Spotlight-V100",
+                "Vol/Docs/.Spotlight-V100/x",
+                "Vol/Docs/a.txt",
+                "Vol/Trash",
+                "Vol/Trash/mine.txt",
+                "Vol/keep.txt",
+            ]
+        );
+        assert_eq!(summary.files, 4);
+        // Folders count once; what is inside them is not reported.
+        let left: Vec<(&str, Skip)> = log.skipped.iter().map(|(p, w)| (p.as_str(), *w)).collect();
+        assert_eq!(
+            left,
+            [
+                ("Vol/.DS_Store", Skip::System),
+                ("Vol/._x", Skip::System),
+                ("Vol/__MACOSX", Skip::System),
+                ("Vol/Icon\r", Skip::System),
+                ("Vol/.Spotlight-V100", Skip::System),
+                ("Vol/Desktop DB", Skip::System),
+                ("Vol/Docs/.DS_Store", Skip::System),
+            ]
+        );
+        assert_eq!(summary.skipped_system, 7);
+        assert_eq!(summary.skipped_other, 0);
+        assert_eq!(summary.failed, 0);
+
+        // Hidden goes first: with hidden entries off, the hidden classic
+        // `Desktop DB` is a hidden skip, not a housekeeping one.
+        let no_hidden = Temp::new("system-no-hidden");
+        let options = CopyOptions {
+            hidden: false,
+            ..options(false)
+        };
+        let (result, log) = run(&fs, &[item(1, "Vol")], &no_hidden.0, &options);
+        let summary = result.unwrap();
+        assert_eq!(summary.skipped_system, 6);
+        assert_eq!(summary.skipped_other, 1);
+        assert!(
+            log.skipped
+                .contains(&("Vol/Desktop DB".into(), Skip::Hidden))
+        );
+    }
+
+    #[test]
+    fn housekeeping_items_are_copied_when_asked() {
+        let fs = housekeeping_volume();
+        let temp = Temp::new("system-all");
+        let options = CopyOptions {
+            copy_system_items: true,
+            ..options(false)
+        };
+        let (result, log) = run(&fs, &[item(1, "Vol")], &temp.0, &options);
+        let summary = result.unwrap();
+        assert_eq!(summary.files, 12, "{:?}", summary.first_failures);
+        assert_eq!(summary.skipped_system, 0);
+        assert!(log.skipped.is_empty());
+        let got = tree(&temp.0);
+        for key in [
+            "Vol/.DS_Store",
+            "Vol/__MACOSX/._a",
+            "Vol/__MACOSX/sub/f",
+            "Vol/.Spotlight-V100/Store-V2/db",
+            "Vol/Docs/.DS_Store",
+            "Vol/Desktop DB",
+        ] {
+            assert!(got.contains_key(key), "{key} in {:?}", got.keys());
+        }
+    }
+
+    #[test]
+    fn selected_housekeeping_items_are_always_copied() {
+        let fs = housekeeping_volume();
+        let temp = Temp::new("system-picked");
+        let items = [
+            item(2, ".DS_Store"),
+            item(4, "__MACOSX"),
+            item(9, ".Spotlight-V100"),
+        ];
+        let (result, log) = run(&fs, &items, &temp.0, &options(false));
+        let summary = result.unwrap();
+        let keys: Vec<String> = tree(&temp.0).into_keys().collect();
+        assert_eq!(
+            keys,
+            [
+                ".DS_Store",
+                ".Spotlight-V100",
+                ".Spotlight-V100/Store-V2",
+                ".Spotlight-V100/Store-V2/db",
+                "__MACOSX",
+                "__MACOSX/sub",
+                "__MACOSX/sub/f",
+            ]
+        );
+        // Inside a selected folder the rule applies again.
+        assert_eq!(log.skipped, [("__MACOSX/._a".to_string(), Skip::System)]);
+        assert_eq!(summary.skipped_system, 1);
+    }
+
+    #[test]
+    fn root_hidden_list_hides_root_names() {
+        let mut fs = Mock::new();
+        fs.file(1, ".hidden", 2, b"secret\r\nbin\nmissing\n")
+            .file(1, "secret", 3, b"s")
+            .dir(1, "bin", 4)
+            .file(4, "ls", 5, b"ls")
+            .file(1, "open", 6, b"o")
+            .dir(1, "Docs", 7)
+            .file(7, "secret", 8, b"s")
+            .file(7, "bin", 9, b"b");
+        let temp = Temp::new("hidden-list");
+        let leave_out = CopyOptions {
+            hidden: false,
+            ..options(false)
+        };
+        // The root twice in one job: the list is read once.
+        let items = [item(1, "Vol"), item(1, "Again")];
+        let (result, log) = run(&fs, &items, &temp.0, &leave_out);
+        let summary = result.unwrap();
+        assert_eq!(fs.lookups.load(Ordering::SeqCst), 1);
+        let keys: Vec<String> = tree(&temp.0)
+            .into_keys()
+            .filter(|k| k.starts_with("Vol"))
+            .collect();
+        // Only the root's names are hidden by it, not the same names below.
+        assert_eq!(
+            keys,
+            [
+                "Vol",
+                "Vol/Docs",
+                "Vol/Docs/bin",
+                "Vol/Docs/secret",
+                "Vol/open"
+            ]
+        );
+        assert_eq!(summary.files, 6);
+        assert_eq!(
+            log.skipped[..3],
+            [
+                ("Vol/.hidden".to_string(), Skip::System),
+                ("Vol/secret".to_string(), Skip::Hidden),
+                ("Vol/bin".to_string(), Skip::Hidden),
+            ]
+        );
+
+        // Hidden entries copied: the list is not even read.
+        fs.lookups.store(0, Ordering::SeqCst);
+        let all = Temp::new("hidden-list-all");
+        let (result, _) = run(&fs, &[item(1, "Vol")], &all.0, &options(false));
+        let summary = result.unwrap();
+        assert_eq!(fs.lookups.load(Ordering::SeqCst), 0);
+        assert_eq!(summary.files, 5);
+        assert_eq!(summary.skipped_system, 1);
+    }
+
     #[test]
     fn listing_error_keeps_what_was_listed() {
         let mut fs = Mock::new();
@@ -2004,7 +2264,12 @@ mod tests {
                 }
             });
         let temp = Temp::new("mockforks");
-        let (result, log) = run(&fs, &[item(2, "top")], &temp.0, &options(true));
+        // The real `._x` is a housekeeping item: copy those, or it stays behind.
+        let with_system = CopyOptions {
+            copy_system_items: true,
+            ..options(true)
+        };
+        let (result, log) = run(&fs, &[item(2, "top")], &temp.0, &with_system);
         let summary = result.unwrap();
         let got = tree(&temp.0);
         assert_eq!(got["top/._x"], Some(b"real".to_vec()));

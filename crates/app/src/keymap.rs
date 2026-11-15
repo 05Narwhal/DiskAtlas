@@ -48,8 +48,22 @@ pub const QUICK_LOOK: &str = "QuickLook";
 /// the panel (it closes), so it must reach the panel's context from a focused button.
 pub const QUICK_LOOK_BUTTON: &str = "QuickLookButton";
 
+/// Key context of the bytes grid of the Quick Look panel (`views/bytes.rs`): the arrow keys move
+/// its selection instead of the file list's.
+pub const BYTES_GRID: &str = "BytesGrid";
+
+/// Key context of the bytes view's "Go to byte" field. Space, the arrows and the other keys the
+/// panel binds are bound to nothing here, so the field can take typing.
+pub const BYTES_GO_TO: &str = "BytesGoTo";
+
 /// Key context of a focusable button.
 pub const BUTTON: &str = "Button";
+
+/// Key context of the strip that asks about resource forks above the footer.
+pub const COPY_STRIP: &str = "CopyStrip";
+
+/// Key context of the panel with the details of a copy.
+pub const COPY_DETAILS: &str = "CopyDetails";
 
 /// Key context of the search field (`components/search_field.rs`).
 pub const SEARCH_FIELD: &str = "SearchField";
@@ -263,6 +277,47 @@ pub mod quick_look {
     );
 }
 
+/// Actions of the Quick Look bytes view (`views/bytes.rs`).
+pub mod bytes {
+    gpui::actions!(
+        bytes,
+        [
+            /// Move the selection one byte left.
+            Left,
+            /// Move the selection one byte right.
+            Right,
+            /// Move the selection one row up.
+            Up,
+            /// Move the selection one row down.
+            Down,
+            /// Extend the selection one byte left.
+            ExtendLeft,
+            /// Extend the selection one byte right.
+            ExtendRight,
+            /// Extend the selection one row up.
+            ExtendUp,
+            /// Extend the selection one row down.
+            ExtendDown,
+            /// Move the selection a page up.
+            PageUp,
+            /// Move the selection a page down.
+            PageDown,
+            /// Select the first byte.
+            Start,
+            /// Select the last byte.
+            End,
+            /// Copy the selected bytes as hex text.
+            Copy,
+            /// Go to the offset typed in the "Go to byte" field.
+            GoToConfirm,
+            /// Close the "Go to byte" field.
+            GoToClose,
+            /// A key the "Go to byte" field swallows so the panel does not act on it.
+            Ignore,
+        ]
+    );
+}
+
 /// Actions of auxiliary windows (Quick Look, Properties, Settings).
 pub mod aux {
     gpui::actions!(
@@ -331,6 +386,29 @@ pub mod workspace {
             /// Open the Properties window of the selection, or of the folder shown when nothing
             /// is selected (Alt+Enter, Ctrl+I).
             Properties,
+            /// Copy the selected rows of a disk to a folder of this computer (Ctrl+Shift+C, the
+            /// details pane's button, the file list's menu).
+            CopyToComputer,
+        ]
+    );
+}
+
+/// Actions of the copy to this computer's footer, strip and panel (`components/statusbar.rs`,
+/// `components/copy_ui.rs`).
+pub mod transfers {
+    gpui::actions!(
+        transfers,
+        [
+            /// Stop the copy that is running.
+            Cancel,
+            /// Close the fork question without copying (Escape).
+            CancelAsk,
+            /// Close the panel with the details of a copy (Escape).
+            CloseDetails,
+            /// Flip "Keep resource forks and Finder information" in the copy menu.
+            ToggleForks,
+            /// Flip "Also copy housekeeping files" in the copy menu.
+            ToggleSystemItems,
         ]
     );
 }
@@ -372,6 +450,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("backspace", GoUp, list),
         KeyBinding::new("secondary-enter", ShowInFolder, list),
         KeyBinding::new("shift-enter", OpenInApp, list),
+        KeyBinding::new("secondary-shift-c", CopyToComputer, list),
         // The list hands Space back when it continues a name being typed.
         KeyBinding::new("space", quick_look::Toggle, list),
         KeyBinding::new("menu", menu::Open, list),
@@ -435,6 +514,37 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("left", quick_look::ScrollLeft, panel),
         KeyBinding::new("right", quick_look::ScrollRight, panel),
     ]);
+    // The bytes grid: deeper than the panel, so its arrows win there.
+    let grid = Some(BYTES_GRID);
+    cx.bind_keys([
+        KeyBinding::new("left", bytes::Left, grid),
+        KeyBinding::new("right", bytes::Right, grid),
+        KeyBinding::new("up", bytes::Up, grid),
+        KeyBinding::new("down", bytes::Down, grid),
+        KeyBinding::new("shift-left", bytes::ExtendLeft, grid),
+        KeyBinding::new("shift-right", bytes::ExtendRight, grid),
+        KeyBinding::new("shift-up", bytes::ExtendUp, grid),
+        KeyBinding::new("shift-down", bytes::ExtendDown, grid),
+        KeyBinding::new("pageup", bytes::PageUp, grid),
+        KeyBinding::new("pagedown", bytes::PageDown, grid),
+        KeyBinding::new("home", bytes::Start, grid),
+        KeyBinding::new("end", bytes::End, grid),
+        KeyBinding::new("secondary-c", bytes::Copy, grid),
+    ]);
+    let go_to = Some(BYTES_GO_TO);
+    cx.bind_keys([
+        KeyBinding::new("enter", bytes::GoToConfirm, go_to),
+        KeyBinding::new("escape", bytes::GoToClose, go_to),
+        KeyBinding::new("space", bytes::Ignore, go_to),
+        KeyBinding::new("left", bytes::Ignore, go_to),
+        KeyBinding::new("right", bytes::Ignore, go_to),
+        KeyBinding::new("up", bytes::Ignore, go_to),
+        KeyBinding::new("down", bytes::Ignore, go_to),
+        KeyBinding::new("home", bytes::Ignore, go_to),
+        KeyBinding::new("end", bytes::Ignore, go_to),
+        KeyBinding::new("pageup", bytes::Ignore, go_to),
+        KeyBinding::new("pagedown", bytes::Ignore, go_to),
+    ]);
     // Escape in the list leaves a search. The field has its own Escape in its own context; the
     // two never meet because only one of them holds focus.
     cx.bind_keys([KeyBinding::new("escape", LeaveSearch, list)]);
@@ -474,6 +584,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", menu::Close, menu_context),
         KeyBinding::new("tab", menu::FocusNext, menu_context),
         KeyBinding::new("shift-tab", menu::FocusPrev, menu_context),
+    ]);
+    // The fork question above the footer and the panel of a copy's details close on Escape.
+    cx.bind_keys([
+        KeyBinding::new("escape", transfers::CancelAsk, Some(COPY_STRIP)),
+        KeyBinding::new("escape", transfers::CloseDetails, Some(COPY_DETAILS)),
     ]);
     cx.bind_keys([KeyBinding::new("enter", Press, Some(QUICK_LOOK_BUTTON))]);
     let button = Some(BUTTON);

@@ -94,11 +94,17 @@ pub struct Query {
     pub modified: Option<RangeInclusive<i64>>,
     /// Also admit hidden entries.
     pub include_hidden: bool,
+    /// Also admit housekeeping items and everything inside them (entries
+    /// with [`IndexFlags::SYSTEM_ITEM`], such as `.DS_Store` or the content
+    /// of `.Spotlight-V100`). Independent of `include_hidden`: an entry that
+    /// is both hidden and a housekeeping item needs both.
+    pub include_system: bool,
 }
 
 impl Query {
     /// True when something other than the text restricts the results.
-    /// `include_hidden` only widens them, so it is not a filter.
+    /// `include_hidden` and `include_system` only widen them, so they are
+    /// not filters.
     fn has_filters(&self) -> bool {
         self.scope.is_some()
             || !self.kinds.is_empty()
@@ -113,6 +119,7 @@ impl Query {
             && self.size == other.size
             && self.modified == other.modified
             && self.include_hidden == other.include_hidden
+            && self.include_system == other.include_system
     }
 }
 
@@ -408,7 +415,9 @@ struct Scan<'a> {
     flags: &'a [u16],
     sizes: &'a [u64],
     times: &'a [i64],
-    include_hidden: bool,
+    /// Flag bits that keep an entry out: [`IndexFlags::HIDDEN`] and
+    /// [`IndexFlags::SYSTEM_ITEM`] unless the query admits them.
+    excluded: u16,
     kinds: KindSet,
     size: Option<(u64, u64)>,
     modified: Option<(i64, i64)>,
@@ -432,7 +441,7 @@ impl Scan<'_> {
     /// and contains every term in `check`; `None` otherwise.
     fn admit(&self, e: usize) -> Option<u64> {
         let f = *self.flags.get(e)?;
-        if !self.include_hidden && f & IndexFlags::HIDDEN != 0 {
+        if f & self.excluded != 0 {
             return None;
         }
         if !self.kinds.is_empty() && !self.kinds.admits(IndexFlags::from_bits(f).kind_class()) {
@@ -648,6 +657,18 @@ fn primary_term(terms: &[String]) -> Option<usize> {
     best.map(|(i, _)| i)
 }
 
+/// The flag bits whose entries `query` leaves out.
+fn excluded_flags(query: &Query) -> u16 {
+    let mut bits = 0;
+    if !query.include_hidden {
+        bits |= IndexFlags::HIDDEN;
+    }
+    if !query.include_system {
+        bits |= IndexFlags::SYSTEM_ITEM;
+    }
+    bits
+}
+
 /// Step 3's condition for using `previous` as the candidate set.
 fn can_narrow(
     query: &Query,
@@ -711,7 +732,7 @@ impl Index {
             flags: self.flag_words(),
             sizes: self.sizes(),
             times: self.modified_times(),
-            include_hidden: query.include_hidden,
+            excluded: excluded_flags(query),
             kinds: query.kinds,
             size: query.size.as_ref().map(|r| (*r.start(), *r.end())),
             modified: query.modified.as_ref().map(|r| (*r.start(), *r.end())),
@@ -775,6 +796,7 @@ impl Index {
 #[cfg(test)]
 pub(super) mod fixtures {
     use crate::fs::{EntryFlags, NodeKind, ScanSummary};
+    use crate::mac::system_item;
     use crate::search::index::{Index, IndexFlags, IndexParts, NO_RSIZE, NO_SIZE, NO_TIME};
     use crate::search::kind::classify_entry;
 
@@ -875,16 +897,38 @@ pub(super) mod fixtures {
                 .map(|s| s.modified.unwrap_or(NO_TIME))
                 .collect(),
             rsize: specs.iter().map(|s| s.rsize.unwrap_or(NO_RSIZE)).collect(),
-            flags: specs
-                .iter()
-                .map(|s| {
-                    let class = classify_entry(&s.name, s.kind == NodeKind::Directory, None);
-                    IndexFlags::new(s.kind, s.flags, s.rsize.is_some_and(|r| r > 0), class).bits()
-                })
-                .collect(),
+            flags: flags(specs).into(),
             identity: None,
             summary: ScanSummary::default(),
         })
+    }
+
+    /// The flag words of `specs`, bit 6 set as the build sets it: on a
+    /// housekeeping item (a direct child of entry 0 is at the root) and on
+    /// everything inside one.
+    fn flags(specs: &[Spec]) -> Vec<u16> {
+        let mut out: Vec<u16> = specs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let class = classify_entry(&s.name, s.kind == NodeKind::Directory, None);
+                let flags = IndexFlags::new(s.kind, s.flags, s.rsize.is_some_and(|r| r > 0), class);
+                let at_root = i != 0 && s.parent == 0;
+                let hidden = s.flags.contains(EntryFlags::HIDDEN);
+                if i != 0 && system_item(&s.name, s.kind, at_root, hidden).is_some() {
+                    flags.with_system_item().bits()
+                } else {
+                    flags.bits()
+                }
+            })
+            .collect();
+        for i in 1..out.len() {
+            let p = specs[i].parent as usize;
+            if p < i && out[p] & IndexFlags::SYSTEM_ITEM != 0 {
+                out[i] |= IndexFlags::SYSTEM_ITEM;
+            }
+        }
+        out
     }
 
     pub struct Rng(pub u64);
@@ -1070,6 +1114,9 @@ mod tests {
             let entry = index.entry(e).unwrap();
             let flags = index.flags(e).unwrap();
             if flags.is_hidden() && !query.include_hidden {
+                continue;
+            }
+            if flags.is_system_item() && !query.include_system {
                 continue;
             }
             if !query.kinds.admits(flags.kind_class()) {
@@ -1373,6 +1420,104 @@ mod tests {
             .unwrap();
         assert!(hits.is_empty());
         assert!(!hits.planned);
+    }
+
+    /// Every name holds a `t`. 1 plain, 2 a hidden dot file, 3 a
+    /// `.DS_Store` the volume does not flag hidden, 4 a root
+    /// `.Spotlight-V100` and 5 a file inside it (inherits bit 6), 6 a hidden
+    /// AppleDouble file (hidden and housekeeping).
+    fn system_index() -> Index {
+        index(&[
+            root("Vol"),
+            file("notes.txt", 0),
+            file(".gitignore", 0).hidden(),
+            file(".DS_Store", 0),
+            dir(".Spotlight-V100", 0),
+            file("store.db", 4),
+            file("._notes.txt", 0).hidden(),
+        ])
+    }
+
+    fn with_switches(text: &str, hidden: bool, system: bool) -> Query {
+        Query {
+            include_hidden: hidden,
+            include_system: system,
+            ..q(text)
+        }
+    }
+
+    #[test]
+    fn system_items_follow_their_own_switch() {
+        let index = system_index();
+        let system: Vec<bool> = (0..7)
+            .map(|e| index.flags(e).unwrap().is_system_item())
+            .collect();
+        assert_eq!(system, [false, false, false, true, true, true, true]);
+        let cases: [(bool, bool, &[u32]); 4] = [
+            (false, false, &[1]),
+            // `.gitignore` shows, `.DS_Store` does not.
+            (true, false, &[1, 2]),
+            // Housekeeping shows; the hidden AppleDouble file stays hidden.
+            (false, true, &[1, 3, 4, 5]),
+            (true, true, &[1, 2, 3, 4, 5, 6]),
+        ];
+        for (hidden, system, want) in cases {
+            let query = with_switches("t", hidden, system);
+            let mut got = run(&index, &query);
+            got.sort_unstable();
+            assert_eq!(got, want, "{query:?}");
+            assert_eq!(run(&index, &query), naive(&index, &query), "{query:?}");
+            // The filter-only path (no terms) applies the switches too.
+            let scoped = Query {
+                scope: Some(0),
+                ..with_switches("", hidden, system)
+            };
+            let mut got = run(&index, &scoped);
+            got.sort_unstable();
+            assert_eq!(got, want, "{scoped:?}");
+        }
+    }
+
+    #[test]
+    fn include_system_alone_is_not_a_filter() {
+        let index = system_index();
+        let never = AtomicBool::new(false);
+        let hits = index
+            .search(&with_switches("", true, true), None, &never)
+            .unwrap();
+        assert!(hits.is_empty());
+        assert!(!hits.planned);
+    }
+
+    #[test]
+    fn toggling_include_system_does_not_narrow() {
+        let index = system_index();
+        let never = AtomicBool::new(false);
+        let len = index.len() as usize;
+        let before = q("t");
+        let prev = index.search(&before, None, &never).unwrap();
+        assert_eq!(prev.len(), 1);
+        // Same switches: a longer term narrows the one hit.
+        assert!(can_narrow(&q("to"), &terms("to"), (&before, &prev), len));
+        // Switched on: the previous hits miss what it admits, so no narrowing.
+        let after = with_switches("to", false, true);
+        assert!(!can_narrow(&after, &terms("to"), (&before, &prev), len));
+        let mut got = index
+            .search(&after, Some((&before, &prev)), &never)
+            .unwrap();
+        got.sort_all();
+        let mut entries = got.entries_in_order().to_vec();
+        entries.sort_unstable();
+        // `.DS_Store` and `store.db`.
+        assert_eq!(entries, [3, 5]);
+        assert_eq!(got.entries_in_order().to_vec(), naive(&index, &after));
+        // And back off again.
+        let on = with_switches("t", false, true);
+        let on_hits = index.search(&on, None, &never).unwrap();
+        let off = q("to");
+        assert!(!can_narrow(&off, &terms("to"), (&on, &on_hits), len));
+        let got = index.search(&off, Some((&on, &on_hits)), &never).unwrap();
+        assert!(got.is_empty());
     }
 
     #[test]
@@ -1906,6 +2051,16 @@ mod tests {
             let parent = *folders.last().unwrap();
             let entry = specs.len() as u32;
             let folder = rng.below(5) == 0;
+            // Now and then a housekeeping name (some count only at the
+            // root, `Trash` only when hidden).
+            if rng.below(15) == 0 {
+                name = if folder {
+                    rng.pick(&["__MACOSX", ".Spotlight-V100", "Trash", "aa"])
+                } else {
+                    rng.pick(&[".DS_Store", "._aa", "Thumbs.db", "Icon\r", "._"])
+                }
+                .to_string();
+            }
             let mut spec = if folder {
                 dir(&name, parent)
             } else {
@@ -1926,6 +2081,10 @@ mod tests {
             }
         }
         let index = index(&specs);
+        let system = (0..index.len())
+            .filter(|&e| index.flags(e).is_some_and(|f| f.is_system_item()))
+            .count();
+        assert!(system > 50, "{system} housekeeping entries");
         let never = AtomicBool::new(false);
         for round in 0..300 {
             let mut query = q(rng.pick(&QUERIES));
@@ -1939,6 +2098,11 @@ mod tests {
                 2 => query.kinds = KindSet::EMPTY.with(KindClass::Folder),
                 3 => query.scope = Some(rng.below(index.len() as u64 + 2) as u32),
                 4 => query.include_hidden = true,
+                5 => query.include_system = true,
+                6 => {
+                    query.include_hidden = true;
+                    query.include_system = true;
+                }
                 _ => {}
             }
             let want = naive(&index, &query);
@@ -1958,6 +2122,19 @@ mod tests {
                     got.entries_in_order().to_vec(),
                     want,
                     "narrowed {round}: {query:?}"
+                );
+                // The previous search had the other `include_system`.
+                let mut toggled = shorter.clone();
+                toggled.include_system = !toggled.include_system;
+                let prev = index.search(&toggled, None, &never).unwrap();
+                let mut got = index
+                    .search(&query, Some((&toggled, &prev)), &never)
+                    .unwrap();
+                got.sort_all();
+                assert_eq!(
+                    got.entries_in_order().to_vec(),
+                    want,
+                    "toggled {round}: {query:?}"
                 );
             }
         }

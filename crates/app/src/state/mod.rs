@@ -15,6 +15,7 @@
 
 //! Application state held in GPUI entities.
 
+pub mod bytes;
 pub mod checksum;
 pub mod facts;
 pub mod listing;

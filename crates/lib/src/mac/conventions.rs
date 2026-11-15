@@ -14,10 +14,23 @@
 // See the LICENSE file for the full license text.
 
 //! The table of housekeeping items: names that operating systems and tools
-//! leave on volumes and that the user normally does not want to see.
+//! leave on volumes and that the user normally does not want to see, and the
+//! root `.hidden` list of old Mac OS X.
 //! Source: `.claude/docs/design/r10-everyday.md` section 5.1.
+//!
+//! Everything here is pure except [`read_hidden_list`], which reads one
+//! small file from a volume.
 
-use crate::fs::NodeKind;
+use crate::fs::{FileSystem, NodeKind, Stream};
+
+/// Most bytes of a root `.hidden` file that are read; the rest is ignored.
+pub const MAX_HIDDEN_LIST: usize = 64 * 1024;
+
+/// Most names taken from a `.hidden` file.
+pub const MAX_HIDDEN_NAMES: usize = 1024;
+
+/// Longest line of a `.hidden` file taken as a name, in bytes.
+pub const MAX_HIDDEN_NAME: usize = 255;
 
 /// What kind of housekeeping item an entry is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -210,6 +223,72 @@ pub fn system_item(name: &str, kind: NodeKind, at_root: bool, hidden: bool) -> O
         | "OpenFolderListDF\r" => Some(S::ClassicHousekeeping),
         _ => None,
     }
+}
+
+/// The names a root `.hidden` file (Mac OS X 10.0 to 10.3) asks to hide.
+///
+/// Lines end in LF, CR or CRLF; nothing but the line ending is trimmed.
+/// Empty lines, lines longer than [`MAX_HIDDEN_NAME`] bytes, lines holding
+/// NUL or `/`, and lines that are not UTF-8 are skipped. At most the first
+/// [`MAX_HIDDEN_LIST`] bytes are read (a line cut off at that limit is
+/// dropped) and at most [`MAX_HIDDEN_NAMES`] names are returned.
+pub fn parse_hidden_list(bytes: &[u8]) -> Vec<String> {
+    let is_end = |b: &u8| *b == b'\n' || *b == b'\r';
+    let mut head = bytes.get(..MAX_HIDDEN_LIST).unwrap_or(bytes);
+    // Cut at the limit in the middle of a line: that line is not whole.
+    if bytes.get(MAX_HIDDEN_LIST).is_some_and(|b| !is_end(b)) {
+        head = match head.iter().rposition(is_end) {
+            Some(end) => head.get(..end).unwrap_or(&[]),
+            None => &[],
+        };
+    }
+    let mut names = Vec::new();
+    // CRLF splits into a line and an empty one, which is skipped.
+    for line in head.split(is_end) {
+        if names.len() >= MAX_HIDDEN_NAMES {
+            break;
+        }
+        if line.is_empty()
+            || line.len() > MAX_HIDDEN_NAME
+            || line.iter().any(|&b| b == 0 || b == b'/')
+        {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(line) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The names the volume root's `.hidden` file asks to hide, read through
+/// [`parse_hidden_list`].
+///
+/// Advisory: an empty list when there is no `.hidden` file in the root, when
+/// it is not a file, or when anything about reading it fails. Reads at most
+/// [`MAX_HIDDEN_LIST`] bytes, plus one to know whether a line was cut off.
+pub fn read_hidden_list(fs: &dyn FileSystem) -> Vec<String> {
+    let Ok(Some(node)) = fs.lookup(fs.root(), ".hidden") else {
+        return Vec::new();
+    };
+    match fs.metadata(node) {
+        Ok(meta) if meta.kind == NodeKind::File => {}
+        _ => return Vec::new(),
+    }
+    let Ok(source) = fs.open(node, Stream::Data) else {
+        return Vec::new();
+    };
+    // One byte past the limit tells `parse_hidden_list` whether the last
+    // line read is whole. `MAX_HIDDEN_LIST + 1` fits in u64 and usize.
+    let want = source.len().min((MAX_HIDDEN_LIST as u64).saturating_add(1));
+    let Ok(want) = usize::try_from(want) else {
+        return Vec::new();
+    };
+    let mut bytes = vec![0u8; want];
+    if source.read_at(0, &mut bytes).is_err() {
+        return Vec::new();
+    }
+    parse_hidden_list(&bytes)
 }
 
 impl SystemItem {
@@ -530,6 +609,174 @@ mod tests {
         assert_eq!(root(".Trash-abc", D), None);
         assert_eq!(root(".Trash-10a", D), None);
         assert_eq!(system_item(".Trash-1000", D, false, false), None);
+    }
+
+    // ---- .hidden -------------------------------------------------------
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn hidden_list_line_endings() {
+        assert_eq!(parse_hidden_list(b"a\nb\nc"), names(&["a", "b", "c"]));
+        assert_eq!(parse_hidden_list(b"a\rb\rc\r"), names(&["a", "b", "c"]));
+        assert_eq!(
+            parse_hidden_list(b"a\r\nb\r\nc\r\n"),
+            names(&["a", "b", "c"])
+        );
+        assert_eq!(parse_hidden_list(b"a\n\r\n\rb\n\n"), names(&["a", "b"]));
+        // Only the line ending goes: spaces and tabs are part of the name.
+        assert_eq!(
+            parse_hidden_list(b" bin \n\tusr\n"),
+            names(&[" bin ", "\tusr"])
+        );
+    }
+
+    #[test]
+    fn hidden_list_empty_inputs() {
+        assert!(parse_hidden_list(b"").is_empty());
+        assert!(parse_hidden_list(b"\n").is_empty());
+        assert!(parse_hidden_list(b"\r\n\r\n\n\r").is_empty());
+    }
+
+    #[test]
+    fn hidden_list_skips_bad_lines() {
+        let long = "x".repeat(300);
+        let longest = "y".repeat(MAX_HIDDEN_NAME);
+        let mut input = Vec::new();
+        let lines: [&[u8]; 9] = [
+            long.as_bytes(),
+            longest.as_bytes(),
+            b"a\0b",
+            b"etc/passwd",
+            b"/",
+            b"bad \xFF utf8",
+            b"\xC3",
+            "caf\u{e9}".as_bytes(),
+            b"ok",
+        ];
+        for line in lines {
+            input.extend_from_slice(line);
+            input.push(b'\n');
+        }
+        assert_eq!(
+            parse_hidden_list(&input),
+            vec![longest, "caf\u{e9}".to_owned(), "ok".to_owned()]
+        );
+    }
+
+    #[test]
+    fn hidden_list_stops_at_the_name_limit() {
+        let input: String = (0..2000).map(|i| format!("n{i}\n")).collect();
+        let got = parse_hidden_list(input.as_bytes());
+        assert_eq!(got.len(), MAX_HIDDEN_NAMES);
+        assert_eq!(got.first().map(String::as_str), Some("n0"));
+        assert_eq!(got.last().map(String::as_str), Some("n1023"));
+        // Skipped lines do not count towards the limit.
+        let mixed: String = (0..2000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    "\0\n".to_owned()
+                } else {
+                    format!("m{i}\n")
+                }
+            })
+            .collect();
+        let got = parse_hidden_list(mixed.as_bytes());
+        assert_eq!(got.len(), 1000);
+    }
+
+    #[test]
+    fn hidden_list_reads_only_the_first_64_kib() {
+        // 1 MiB of 8-byte lines: only lines inside the first 64 KiB count,
+        // and the name limit cuts it shorter still.
+        let line = b"abcdefg\n";
+        let mut input = Vec::with_capacity(1 << 20);
+        while input.len() < 1 << 20 {
+            input.extend_from_slice(line);
+        }
+        assert_eq!(parse_hidden_list(&input).len(), MAX_HIDDEN_NAMES);
+
+        // Few long lines: the byte limit, not the name limit, ends it.
+        let name = "z".repeat(200);
+        let mut big = Vec::new();
+        while big.len() < 1 << 20 {
+            big.extend_from_slice(name.as_bytes());
+            big.push(b'\n');
+        }
+        let got = parse_hidden_list(&big);
+        assert_eq!(got.len(), MAX_HIDDEN_LIST / 201);
+        assert!(got.iter().all(|n| *n == name));
+
+        // A line cut by the limit is dropped; one that ends at it is kept.
+        let mut cut = vec![b'a'; MAX_HIDDEN_LIST - 3];
+        cut[0] = b'\n';
+        cut.extend_from_slice(b"\nlongname\n");
+        assert!(parse_hidden_list(&cut).is_empty());
+        let mut whole = vec![b'\n'; MAX_HIDDEN_LIST - 3];
+        whole.extend_from_slice(b"abc\nnext\n");
+        assert_eq!(parse_hidden_list(&whole), names(&["abc"]));
+        // Exactly the limit, no line ending at all: one name.
+        let mut exact = vec![b'\n'; MAX_HIDDEN_LIST - 4];
+        exact.extend_from_slice(b"last");
+        assert_eq!(parse_hidden_list(&exact), names(&["last"]));
+    }
+
+    mod volume {
+        use super::super::*;
+        use crate::fs::hfsplus::test_volume::{self, FileSpec, ROOT, VolumeBuilder};
+        use crate::fs::hfsplus::{self, HfsPlus};
+
+        fn mounted(v: &VolumeBuilder) -> HfsPlus {
+            hfsplus::mount(test_volume::source(v.build())).unwrap()
+        }
+
+        fn with_content(bytes: &[u8]) -> FileSpec {
+            FileSpec {
+                content: Some(bytes.to_vec()),
+                ..FileSpec::regular(0)
+            }
+        }
+
+        #[test]
+        fn read_from_the_root() {
+            let mut v = VolumeBuilder::new("Old");
+            v.file(ROOT, ".hidden", 16, with_content(b"bin\r\nusr\r\n\0x\r\n"))
+                .folder(ROOT, "bin", 17);
+            let fs = mounted(&v);
+            assert_eq!(read_hidden_list(&fs), vec!["bin", "usr"]);
+        }
+
+        #[test]
+        fn missing_or_not_a_file_is_empty() {
+            let mut v = VolumeBuilder::new("None");
+            // Only the root's own `.hidden` counts.
+            v.folder(ROOT, "Docs", 16)
+                .file(16, ".hidden", 17, with_content(b"Docs\n"));
+            assert!(read_hidden_list(&mounted(&v)).is_empty());
+
+            let mut v = VolumeBuilder::new("Folder");
+            v.folder(ROOT, ".hidden", 16);
+            assert!(read_hidden_list(&mounted(&v)).is_empty());
+
+            let mut v = VolumeBuilder::new("Plain");
+            v.folder(ROOT, "Docs", 16);
+            assert!(read_hidden_list(&mounted(&v)).is_empty());
+        }
+
+        #[test]
+        fn a_long_file_is_read_up_to_the_limit() {
+            let mut content = Vec::new();
+            for i in 0..20_000 {
+                content.extend_from_slice(format!("name {i}\n").as_bytes());
+            }
+            let mut v = VolumeBuilder::new("Long");
+            v.file(ROOT, ".hidden", 16, with_content(&content));
+            let got = read_hidden_list(&mounted(&v));
+            assert_eq!(got.len(), MAX_HIDDEN_NAMES);
+            assert_eq!(got[0], "name 0");
+        }
     }
 
     #[test]

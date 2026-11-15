@@ -16,6 +16,7 @@
 //! Interface components.
 
 pub mod breadcrumb;
+pub mod copy_ui;
 pub mod details;
 pub mod disk_strip;
 pub mod file_row;

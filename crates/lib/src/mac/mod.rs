@@ -14,8 +14,8 @@
 // See the LICENSE file for the full license text.
 
 //! Mac (and other operating systems') housekeeping conventions. Pure
-//! functions, no I/O.
+//! functions, apart from [`read_hidden_list`], which reads one small file.
 
 pub mod conventions;
 
-pub use conventions::{SystemItem, system_item};
+pub use conventions::{SystemItem, parse_hidden_list, read_hidden_list, system_item};

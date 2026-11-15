@@ -205,12 +205,20 @@ pub mod metrics {
     pub const QUICK_LOOK_SEGMENT_PADDING: Pixels = px(16.);
     /// Space between the segmented control's edge and its segments.
     pub const QUICK_LOOK_SEGMENT_INSET: Pixels = px(2.);
+    /// Height of the details pane's "Copy to this computer" button.
+    pub const DETAILS_COPY_HEIGHT: Pixels = px(32.);
     /// Height of a button of the Data | Resource switch in the header's meta line.
     pub const QUICK_LOOK_FORK_HEIGHT: Pixels = px(20.);
     /// Width of a Quick Look toolbar button.
     pub const QUICK_LOOK_TOOL_WIDTH: Pixels = px(34.);
     /// Margin between the content well and the panel's edges.
     pub const QUICK_LOOK_WELL_MARGIN: Pixels = px(16.);
+    /// Height of a row of the bytes view's grid.
+    pub const BYTES_ROW_HEIGHT: Pixels = px(20.);
+    /// Type size of the bytes view's grid.
+    pub const BYTES_TEXT_SIZE: Pixels = px(12.);
+    /// Width of the bytes view's side column.
+    pub const BYTES_SIDE_WIDTH: Pixels = px(188.);
     /// Inner margin around a picture in the Quick Look well.
     pub const QUICK_LOOK_IMAGE_INSET: Pixels = px(24.);
     /// A picture is never drawn larger than this multiple of its pixel size.

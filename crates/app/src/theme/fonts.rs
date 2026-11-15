@@ -19,6 +19,9 @@ use std::{borrow::Cow, sync::Arc};
 
 use gpui::{App, Font, FontFeatures};
 
+/// The family name of the monospaced face of the bytes view, as the font files declare it.
+pub const MONO_FONT: &str = "Atkinson Hyperlegible Mono";
+
 /// The family name of the interface typeface, as the font files declare it.
 pub const UI_FONT: &str = "Atkinson Hyperlegible Next";
 
@@ -38,6 +41,20 @@ static BOLD_ITALIC: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/fonts/AtkinsonHyperlegibleNext-BoldItalic.ttf"
 ));
+
+static MONO_REGULAR: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/fonts/AtkinsonHyperlegibleMono-Regular.ttf"
+));
+static MONO_BOLD: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/fonts/AtkinsonHyperlegibleMono-Bold.ttf"
+));
+
+/// The monospaced face, for `Styled::font`: every character the same width, so columns line up.
+pub fn mono_font() -> Font {
+    gpui::font(MONO_FONT)
+}
 
 /// Tabular figures, so sizes and dates line up in columns.
 pub fn ui_font_features() -> FontFeatures {
@@ -62,15 +79,19 @@ pub fn load(cx: &mut App) -> anyhow::Result<()> {
         Cow::Borrowed(ITALIC),
         Cow::Borrowed(BOLD),
         Cow::Borrowed(BOLD_ITALIC),
+        Cow::Borrowed(MONO_REGULAR),
+        Cow::Borrowed(MONO_BOLD),
     ])?;
 
     let names = text_system.all_font_names();
-    if !names.iter().any(|name| name == UI_FONT) {
-        tracing::warn!(
-            wanted = UI_FONT,
-            found = ?names,
-            "bundled interface font family is not known to the text system"
-        );
+    for wanted in [UI_FONT, MONO_FONT] {
+        if !names.iter().any(|name| name == wanted) {
+            tracing::warn!(
+                wanted,
+                found = ?names,
+                "bundled typeface family is not known to the text system"
+            );
+        }
     }
     Ok(())
 }
@@ -89,7 +110,7 @@ mod tests {
 
     #[test]
     fn font_files_are_embedded() {
-        for bytes in [REGULAR, ITALIC, BOLD, BOLD_ITALIC] {
+        for bytes in [REGULAR, ITALIC, BOLD, BOLD_ITALIC, MONO_REGULAR, MONO_BOLD] {
             // TrueType files start with the version tag 0x00010000.
             assert_eq!(&bytes[..4], &[0, 1, 0, 0]);
         }

@@ -750,6 +750,7 @@ fn make_query(text: &str, filters: &Filters, scope: Option<u32>) -> Query {
         size: filters.size.clone(),
         modified: filters.modified.clone(),
         include_hidden: filters.include_hidden,
+        include_system: false,
     }
 }
 
@@ -1334,6 +1335,7 @@ mod tests {
                 size: Some(5..=50),
                 modified: Some(-3..=7),
                 include_hidden: true,
+                include_system: false,
             }
         );
         // The scope comes from the caller, not from `this_folder`.

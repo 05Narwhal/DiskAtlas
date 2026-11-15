@@ -54,6 +54,7 @@ use crate::theme::{
     scale::{radius, size, space, text},
 };
 use crate::views::aux_window::{self, AuxOptions};
+use crate::views::bytes::BytesView;
 
 /// A horizontal key press scrolls the text by this fraction of its width.
 const HORIZONTAL_STEP_DIVISOR: f32 = 4.0;
@@ -114,16 +115,6 @@ fn widest_row(text: &TextPreview) -> usize {
     best.0
 }
 
-/// The Bytes tab. A placeholder until task 5b builds `views/bytes.rs`; that task replaces this
-/// one function.
-fn bytes_tab(colors: &Colors) -> Div {
-    message(
-        "The bytes view is not built yet.",
-        Some("It will show the file's bytes as hex and text."),
-        colors,
-    )
-}
-
 /// A centred sentence, with an optional line of advice under it.
 fn message(text: &str, hint: Option<&str>, colors: &Colors) -> Div {
     div()
@@ -142,6 +133,8 @@ fn message(text: &str, hint: Option<&str>, colors: &Colors) -> Div {
 /// The Quick Look panel.
 pub struct QuickLookPanel {
     quick_look: Entity<QuickLook>,
+    /// The Bytes tab: it reads the stream and draws the grid itself.
+    bytes: Entity<BytesView>,
     /// Tab stops of the header, in order: the three tabs, then the fork switch's two buttons
     /// (while it shows), then the close button.
     tab_focus: [FocusHandle; 3],
@@ -168,8 +161,10 @@ impl QuickLookPanel {
     pub fn new(quick_look: Entity<QuickLook>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&quick_look, |_, _, cx| cx.notify());
         let reduced_motion = motion::reduced(cx);
+        let bytes = cx.new(|cx| BytesView::new(quick_look.clone(), cx));
         Self {
             quick_look,
+            bytes,
             tab_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             fork_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             close_focus: cx.focus_handle().tab_stop(true),
@@ -184,11 +179,15 @@ impl QuickLookPanel {
         }
     }
 
-    /// The panel's focus stops in Tab order. Task 5b adds the bytes view's here.
+    /// The panel's focus stops in Tab order: the header's buttons, the Bytes grid while that tab
+    /// shows, then the close button.
     fn focus_order(&self, cx: &Context<Self>) -> Vec<FocusHandle> {
         let mut order: Vec<FocusHandle> = self.tab_focus.to_vec();
         if self.quick_look.read(cx).has_resource_fork() {
             order.extend(self.fork_focus.iter().cloned());
+        }
+        if self.quick_look.read(cx).tab() == Tab::Bytes {
+            order.push(self.bytes.read(cx).focus_stop());
         }
         order.push(self.close_focus.clone());
         order
@@ -790,7 +789,7 @@ impl Render for QuickLookPanel {
 
         let body = match tab {
             Tab::Preview => self.preview_tab(&colors, cx),
-            Tab::Bytes => bytes_tab(&colors).into_any_element(),
+            Tab::Bytes => self.bytes.clone().into_any_element(),
             Tab::Details => self.details_tab(&colors, cx),
         };
         let panel = div()
@@ -815,10 +814,11 @@ impl Render for QuickLookPanel {
             .on_action(cx.listener(|this, _: &actions::PreviousTab, _, cx| {
                 this.cycle_tab(false, cx);
             }))
-            // Ctrl+G shows the Bytes tab, where "Go to byte" will live (M5 task 5b builds the
-            // prompt).
-            .on_action(cx.listener(|this, _: &actions::GoToByte, _, cx| {
+            // Ctrl+G shows the Bytes tab and opens its "Go to byte" field.
+            .on_action(cx.listener(|this, _: &actions::GoToByte, window, cx| {
                 this.show_tab(Tab::Bytes, cx);
+                this.bytes
+                    .update(cx, |bytes, cx| bytes.open_go_to(window, cx));
             }))
             .on_action(
                 cx.listener(|this, _: &keymap::workspace::FocusNext, window, cx| {

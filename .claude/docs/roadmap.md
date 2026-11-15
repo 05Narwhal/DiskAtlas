@@ -116,9 +116,9 @@ Not findings, but worth saying so nobody "fixes" them: files of 2,000 lines such
 Design: `design/m5-quicklook-copy.md`.
 
 - [x] F: Preview provider trait. Done ahead of the milestone (2026-11-12), with the trait additions it stands on. Engine: `FileSystem::open`, `xattrs`, `read_xattr` (defaults `Unsupported`, empty, `None`), `XattrInfo`, `Metadata::finder_info`, `VolumeInfo::local_times`; `HfsPlus` and `NativeFs` still answer with the defaults until the M5 task that implements them. App: `preview/mod.rs` (`PreviewProvider`, `Subject`, `Sniff`, `TextPreview` with rows cut at 4 KiB, `EncodedImage`, `Preview`, `load`, `read_prefix`, `decoder`): pictures are decoded on the background thread behind a pixel and byte limit, a decoder panic becomes an error, SVG is refused. `preview/{image,text}.rs` are providers that accept nothing yet. GPUI's real decoder is not covered by a unit test (it needs a running `App`); the timing task checks it in the window.
-- [ ] S: Text, image and bytes views; fork switch.
+- [x] S: Text, image and bytes views; fork switch. Done 2026-11-15 in `lane-a` (not yet merged to `dev`): text and image in task 6, bytes view and Ctrl+G "Go to byte" in task 5b, seen in a window in both themes. Details in `design/m5-quicklook-copy.md` "Changes during build".
 - [ ] S: Structure explanations in the bytes view for known headers.
-- [ ] O: Copy to this computer: streaming copy, name sanitizing, AppleDouble sidecars, progress and cancel.
+- [ ] O: Copy to this computer: streaming copy, name sanitizing, AppleDouble sidecars, progress and cancel. App half (`Transfers`, details-pane button, fork strip, status-bar progress and notice) built and tried in a window 2026-11-15 in `lane-a`; open: cancel and throughput timing (M5 task 8), the quit-while-copying prompt, "last destination offered first".
 
 ## R. Redesign and everyday features (approved 2026-11-13, before M6)
 

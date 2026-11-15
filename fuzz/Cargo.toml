@@ -89,3 +89,10 @@ path = "fuzz_targets/search_index_load.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hidden_list"
+path = "fuzz_targets/hidden_list.rs"
+test = false
+doc = false
+bench = false

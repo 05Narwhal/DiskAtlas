@@ -29,16 +29,21 @@ use disk_atlas_lib::error::Error;
 use disk_atlas_lib::fs::{EntryFlags, NodeKind, Stream, Timestamp};
 use disk_atlas_lib::search::kind::classify_entry;
 use gpui::{
-    Context, Div, Entity, FontWeight, ImageSource, IntoElement, ObjectFit, Render, SharedString,
-    StyledImage, Subscription, Task, Window, div, img, prelude::*, svg,
+    Context, Div, Entity, FocusHandle, FontWeight, ImageSource, IntoElement, ObjectFit, Render,
+    SharedString, StyledImage, Subscription, Task, Window, div, img, prelude::*, svg,
 };
 
+use crate::components::sidebar::tooltip;
 use crate::format;
+use crate::keymap::{BUTTON, controls};
 use crate::preview::Preview;
 use crate::state::facts::{Extra, facts, journal_text, selection_text, subtitle};
 use crate::state::listing::{Listing, ReachKey};
 use crate::state::quick_look::{LoadState, QuickLook};
 use crate::state::sources::SourceId;
+use crate::state::transfers::{
+    NOTHING_SELECTED, Offer, Selection as CopySelection, Transfers, offer,
+};
 use crate::theme::{
     Colors, Glyph, Theme, metrics,
     scale::{radius, space, text},
@@ -75,6 +80,10 @@ pub struct Details {
     listing: Entity<Listing>,
     /// Holds the preview the well shows.
     quick_look: Entity<QuickLook>,
+    /// Receives the copy the button asks for.
+    transfers: Entity<Transfers>,
+    /// The copy button's keyboard focus.
+    copy_focus: FocusHandle,
     /// The node whose metadata is held in `extra` or being fetched.
     requested: Option<Key>,
     /// The metadata that arrived, with the node it belongs to.
@@ -89,6 +98,7 @@ impl Details {
     pub fn new(
         listing: Entity<Listing>,
         quick_look: Entity<QuickLook>,
+        transfers: Entity<Transfers>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&listing, |this, _listing, cx| {
@@ -99,6 +109,8 @@ impl Details {
         let mut details = Self {
             listing,
             quick_look,
+            transfers,
+            copy_focus: cx.focus_handle().tab_stop(true),
             requested: None,
             extra: None,
             task: None,
@@ -265,6 +277,63 @@ fn heading(name: SharedString, subtitle: String, colors: &Colors) -> Div {
 }
 
 impl Details {
+    /// "Copy to this computer", the one filled button of the app, at the foot of the pane. Not
+    /// there for the computer's own filesystem; greyed, with its reason in the tooltip, when
+    /// nothing is selected.
+    fn copy_button(&self, colors: &Colors, cx: &Context<Self>) -> Option<Div> {
+        let (host, selected) = {
+            let listing = self.listing.read(cx);
+            (
+                listing.source_facts(cx).is_none_or(|facts| facts.host),
+                listing.selected_count(),
+            )
+        };
+        let ready = match offer(host, selected) {
+            Offer::NotHere => return None,
+            Offer::Nothing => false,
+            Offer::Ready => true,
+        };
+        let focus_ring = colors.sheet;
+        let button = div()
+            .id("details-copy")
+            .key_context(BUTTON)
+            .track_focus(&self.copy_focus)
+            .flex_none()
+            .w_full()
+            .h(metrics::DETAILS_COPY_HEIGHT)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(radius::ROW)
+            .bg(colors.ink)
+            .text_color(colors.sheet)
+            .font_weight(FontWeight::BOLD)
+            .border_1()
+            .border_color(colors.ink)
+            .focus(move |style| style.border_color(focus_ring))
+            .child("Copy to this computer");
+        let button = if ready {
+            button
+                .cursor_pointer()
+                .on_action(cx.listener(|this, _: &controls::Press, _, cx| this.copy(cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.copy(cx)))
+        } else {
+            button
+                .opacity(0.4)
+                .tooltip(|_, cx| tooltip(SharedString::new_static(NOTHING_SELECTED), cx))
+        };
+        Some(div().flex_none().w_full().child(button))
+    }
+
+    /// Asks the transfers for a copy of what is selected.
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        let Some(selection) = CopySelection::from_listing(self.listing.read(cx), cx) else {
+            return;
+        };
+        self.transfers
+            .update(cx, |transfers, cx| transfers.request(selection, cx));
+    }
+
     /// The well above the name: the selection's picture or first lines when `QuickLook` has them
     /// ready, otherwise the kind's icon.
     fn preview_well(&self, glyph: Glyph, colors: &Colors, cx: &Context<Self>) -> Div {
@@ -344,6 +413,7 @@ impl Render for Details {
             .p(space::S16)
             .gap(space::S16);
 
+        let button = self.copy_button(&colors, cx);
         match self.content(cx) {
             Content::One(subject, extra) => {
                 let glyph =
@@ -363,12 +433,21 @@ impl Render for Details {
                 pane.child(well)
                     .child(heading(subject.name, line, &colors))
                     .child(fact_rows(rows, &colors))
+                    .child(div().flex_1().min_h_0())
+                    .children(button)
             }
             Content::Many(count) => pane
-                .items_center()
-                .justify_center()
-                .text_color(colors.ink3)
-                .child(SharedString::from(selection_text(count))),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(colors.ink3)
+                        .child(SharedString::from(selection_text(count))),
+                )
+                .children(button),
             Content::Folder(name, count, journal) => {
                 let rows: Vec<_> = journal
                     .into_iter()
@@ -376,6 +455,8 @@ impl Render for Details {
                     .collect();
                 pane.child(heading(name, format::items(count), &colors))
                     .child(fact_rows(rows, &colors))
+                    .child(div().flex_1().min_h_0())
+                    .children(button)
             }
             Content::Nothing => pane,
         }

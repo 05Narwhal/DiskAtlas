@@ -60,6 +60,8 @@ pub struct Built {
     /// View, "Show hidden items" and "Show housekeeping files" in the folder menu (R16); the
     /// list honours both settings. "Folders first" is not read yet.
     pub visibility_toggles: bool,
+    /// "Copy to this computer" for rows of a disk Disk Atlas reads (M5 task 7).
+    pub copy_to_computer: bool,
 }
 
 /// What this build has: only what works today.
@@ -73,6 +75,7 @@ pub const BUILT: Built = Built {
     trash_rows: false,
     show_original: false,
     visibility_toggles: true,
+    copy_to_computer: true,
 };
 
 /// The place a menu was opened in. Filled by the caller from `Sources`.
@@ -286,6 +289,14 @@ fn rows_menu(
         place.push(MenuItem::action(
             format!("Show in {}", state.file_manager),
             context::ShowInFileManager,
+        ));
+    }
+    // Out of a disk Disk Atlas reads, onto this computer. A search hit on a disk is a row of the
+    // volume, so it copies too; on the host the operation is R8's.
+    if !source.host && state.built.copy_to_computer {
+        place.push(MenuItem::action(
+            "Copy to this computer",
+            workspace::CopyToComputer,
         ));
     }
 
@@ -569,6 +580,8 @@ mod tests {
             [
                 "Quick Look",
                 "-",
+                "Copy to this computer",
+                "-",
                 "Copy as >",
                 "  Name",
                 "  Path",
@@ -577,6 +590,37 @@ mod tests {
                 "Properties"
             ]
         );
+    }
+
+    #[test]
+    fn rows_of_a_disk_copy_to_this_computer_and_rows_of_the_host_do_not() {
+        let copy = "Copy to this computer".to_owned();
+        // One row, several rows, a folder: all of a disk.
+        for rows_of in [
+            vec![file("a")],
+            vec![file("a"), folder("b")],
+            vec![folder("b")],
+        ] {
+            assert!(menu(&rows(source(false, false), rows_of, false)).contains(&copy));
+        }
+        // A search hit on a disk is a row of the volume.
+        assert!(menu(&rows(source(false, false), vec![file("a")], true)).contains(&copy));
+        // The host's own files are R8's to copy.
+        assert!(!menu(&rows(source(true, false), vec![file("a")], false)).contains(&copy));
+        assert!(!menu(&rows(source(true, false), vec![file("a")], true)).contains(&copy));
+        // And it goes when the build does not have it.
+        let state = MenuState {
+            built: Built {
+                copy_to_computer: false,
+                ..BUILT
+            },
+            ..STATE
+        };
+        let off = lines(&build(
+            &rows(source(false, false), vec![file("a")], false),
+            &state,
+        ));
+        assert!(!off.contains(&copy));
     }
 
     #[test]

@@ -15,11 +15,13 @@
 
 //! The root view: creates the state entities and the views, and lays them out.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
     Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, NavigationDirection,
-    PathPromptOptions, Render, Subscription, Window, WindowHandle, div, prelude::*,
+    PathPromptOptions, PromptLevel, Render, Subscription, Window, WindowHandle, div, prelude::*,
 };
 
 use crate::components::{
@@ -33,9 +35,9 @@ use crate::components::{
     toolbar::FilterRow,
 };
 use crate::keymap::workspace::{
-    FocusNext, FocusPrev, GoBack, GoForward, GoUp, LeaveSearch, OpenImage, OpenImageFolder,
-    OpenSettings, Properties, Refresh, Search as FocusSearch, ToggleDetails, ToggleHidden,
-    ToggleSystemItems,
+    CopyToComputer, FocusNext, FocusPrev, GoBack, GoForward, GoUp, LeaveSearch, OpenImage,
+    OpenImageFolder, OpenSettings, Properties, Refresh, Search as FocusSearch, ToggleDetails,
+    ToggleHidden, ToggleSystemItems,
 };
 use crate::keymap::{context, file_list, quick_look};
 use crate::state::settings::{SettingValue, Settings};
@@ -48,6 +50,7 @@ use crate::state::{
     sizes::Sizes,
     sources::{Sources, SourcesEvent},
     strip::Strip,
+    transfers::{Selection as CopySelection, Transfers},
 };
 use crate::theme::{
     Theme, fonts,
@@ -70,6 +73,8 @@ pub struct Workspace {
     storage_bar: Entity<StorageBar>,
     explorer: Entity<Explorer>,
     statusbar: Entity<StatusBar>,
+    /// The copies out of disks (M5): one runs at a time, the footer reports them.
+    transfers: Entity<Transfers>,
     details: Entity<Details>,
     details_visible: bool,
     /// The details pane opening or closing (`r1-redesign.md` 2.2); `None` at rest.
@@ -139,9 +144,20 @@ impl Workspace {
                 cx,
             )
         });
-        let statusbar = cx.new(|cx| StatusBar::new(listing.clone(), search.clone(), cx));
+        let transfers = cx.new(|_| Transfers::new());
+        let statusbar = cx.new(|cx| {
+            StatusBar::new(
+                listing.clone(),
+                search.clone(),
+                transfers.clone(),
+                window,
+                cx,
+            )
+        });
         let quick_look = cx.new(|cx| QuickLook::new(listing.clone(), cx));
-        let details = cx.new(|cx| Details::new(listing.clone(), quick_look.clone(), cx));
+        let details =
+            cx.new(|cx| Details::new(listing.clone(), quick_look.clone(), transfers.clone(), cx));
+        confirm_quit_while_copying(transfers.clone(), window, cx);
         // The details pane starts visible, and its preview well follows the selection.
         quick_look.update(cx, |quick_look, cx| quick_look.set_peek(true, None, cx));
 
@@ -284,6 +300,7 @@ impl Workspace {
             storage_bar,
             explorer,
             statusbar,
+            transfers,
             details,
             details_visible: true,
             details_motion: None,
@@ -367,6 +384,16 @@ impl Workspace {
             }
             None => {}
         }
+    }
+
+    /// Ctrl+Shift+C and the menus: copies the selected rows of a disk to a folder of this
+    /// computer. Nothing happens for the computer's own filesystem or an empty selection.
+    fn copy_to_computer(&mut self, _: &CopyToComputer, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(selection) = CopySelection::from_listing(self.listing.read(cx), cx) else {
+            return;
+        };
+        self.transfers
+            .update(cx, |transfers, cx| transfers.request(selection, cx));
     }
 
     /// The View menu: flips `show_system_items`.
@@ -608,6 +635,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_system_items))
+            .on_action(cx.listener(Self::copy_to_computer))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_properties))
             .on_action(cx.listener(Self::toggle_details_action))
@@ -673,6 +701,48 @@ impl Render for Workspace {
             )
             .child(crate::frame_trace::end_marker())
     }
+}
+
+/// Closing the window with a copy running asks once ("A copy is still running. Quit anyway?").
+/// A second close while the question is open is ignored. "Quit anyway" cancels the copy, so the
+/// job removes the file being written, and quits.
+fn confirm_quit_while_copying(
+    transfers: Entity<Transfers>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let asking = Rc::new(Cell::new(false));
+    window.on_window_should_close(cx, move |window, cx| {
+        if !transfers.read(cx).busy() {
+            return true;
+        }
+        if asking.replace(true) {
+            return false;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "A copy is still running. Quit anyway?",
+            Some("The file being copied is left out. Files already copied stay where they are."),
+            &["Quit anyway", "Keep copying"],
+            cx,
+        );
+        let asking = Rc::clone(&asking);
+        let transfers = transfers.clone();
+        window
+            .spawn(cx, async move |cx| {
+                let quit = answer.await == Ok(0);
+                asking.set(false);
+                cx.update(|_, cx| {
+                    if quit {
+                        transfers.update(cx, |transfers, _| transfers.cancel_all());
+                        cx.quit();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        false
+    });
 }
 
 /// Turns the switch `key` of the settings over; the settings entity repaints what follows it.

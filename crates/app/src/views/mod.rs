@@ -16,6 +16,7 @@
 //! Top-level views.
 
 pub mod aux_window;
+pub mod bytes;
 pub mod explorer;
 pub mod preview;
 pub mod properties;
