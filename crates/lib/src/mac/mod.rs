@@ -21,6 +21,7 @@ pub mod appledouble;
 pub mod bplist;
 pub mod bundle;
 pub mod conventions;
+pub mod icns;
 pub mod ds_store;
 pub mod original;
 pub mod resource_map;

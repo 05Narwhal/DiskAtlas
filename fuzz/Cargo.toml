@@ -159,3 +159,10 @@ path = "fuzz_targets/ds_store.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "icns"
+path = "fuzz_targets/icns.rs"
+test = false
+doc = false
+bench = false
