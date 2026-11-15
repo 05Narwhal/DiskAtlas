@@ -1488,6 +1488,71 @@ impl Listing {
                 .is_some_and(|row| is_package_entry(&row.entry))
     }
 
+    /// True when the row at `position` is a symbolic link or a classic alias.
+    pub fn is_link_row(&self, position: usize) -> bool {
+        self.row(position).is_some_and(|row| {
+            row.entry.kind == disk_atlas_lib::fs::NodeKind::Symlink
+                || (row.entry.kind == disk_atlas_lib::fs::NodeKind::File
+                    && row.entry.flags.contains(disk_atlas_lib::fs::EntryFlags::ALIAS))
+        })
+    }
+
+    /// "Show original": finds what the link or alias under the cursor points at, on a background
+    /// thread, and goes to its folder with the cursor on it.
+    pub fn show_original_cursor(&mut self, cx: &mut Context<Self>) {
+        let (Some(here), Some(position)) = (self.location.clone(), self.shown.cursor_position)
+        else {
+            return;
+        };
+        if self.results.is_some() || !self.is_link_row(position) {
+            return;
+        }
+        let Some(row) = self.row(position) else {
+            return;
+        };
+        let (node, name) = (row.entry.node, row.entry.name.to_owned());
+        let from: Vec<(NodeId, String)> = here
+            .crumbs()
+            .iter()
+            .skip(1)
+            .map(|crumb| (crumb.node, crumb.name.to_string()))
+            .collect();
+        let Some(root_name) = here.crumbs().first().map(|crumb| crumb.name.clone()) else {
+            return;
+        };
+        let fs = Arc::clone(here.fs());
+        let generation = self.generation;
+        self.activate_task = Some(cx.spawn(async move |this, cx| {
+            let resolved = cx
+                .background_executor()
+                .spawn(async move {
+                    disk_atlas_lib::mac::original::resolve(fs.as_ref(), &from, &name, node)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if generation != this.generation {
+                    return;
+                }
+                match resolved {
+                    Ok(disk_atlas_lib::mac::original::Resolved::Found(original)) => {
+                        let focus = SharedString::from(original.name);
+                        this.open_result_path(original.folder, &root_name, Some(focus), cx);
+                    }
+                    Ok(disk_atlas_lib::mac::original::Resolved::OtherVolume(volume)) => {
+                        this.shown.note =
+                            Some(format!("The original is on a disk called {volume}.").into());
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.shown.note = Some(failure_text(&error));
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
     /// "Show package contents": goes inside the package under the cursor.
     pub fn open_package_cursor(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.shown.cursor_position.and_then(|p| self.row(p)) else {

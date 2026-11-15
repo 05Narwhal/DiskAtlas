@@ -73,7 +73,7 @@ pub const BUILT: Built = Built {
     pins: false,
     open_copy: false,
     trash_rows: true,
-    show_original: false,
+    show_original: true,
     visibility_toggles: true,
     copy_to_computer: true,
 };
@@ -96,6 +96,8 @@ pub struct RowFacts {
     pub disk_image: bool,
     /// A package shown as one item: Quick Look and "Show package contents" in place of "Open".
     pub package: bool,
+    /// A symbolic link or a classic alias: "Show original" (R17.5).
+    pub original: bool,
 }
 
 /// What a disk heading or a failed whole-disk row offers.
@@ -285,6 +287,9 @@ fn rows_menu(
         }
         if !row.folder && !row.package {
             open.push(MenuItem::action("Quick Look", quick_look::Toggle));
+        }
+        if row.original && !in_search && state.built.show_original {
+            open.push(MenuItem::action("Show original", file_list::ShowOriginal));
         }
         if in_search {
             open.push(MenuItem::action(
@@ -558,6 +563,7 @@ mod tests {
             folder: false,
             disk_image: false,
             package: false,
+            original: false,
         }
     }
 

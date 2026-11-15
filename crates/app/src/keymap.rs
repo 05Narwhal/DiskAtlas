@@ -242,6 +242,8 @@ pub mod file_list {
             OpenInApp,
             /// Go inside the package under the cursor.
             ShowPackageContents,
+            /// Go to what the link or alias under the cursor points at.
+            ShowOriginal,
         ]
     );
 }
