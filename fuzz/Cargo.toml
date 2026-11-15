@@ -89,3 +89,10 @@ path = "fuzz_targets/search_index_load.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dc42"
+path = "fuzz_targets/dc42.rs"
+test = false
+doc = false
+bench = false
