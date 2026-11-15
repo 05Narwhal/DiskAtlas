@@ -96,3 +96,17 @@ path = "fuzz_targets/dc42.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hfs_mount"
+path = "fuzz_targets/hfs_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hfs_records"
+path = "fuzz_targets/hfs_records.rs"
+test = false
+doc = false
+bench = false

@@ -13,34 +13,46 @@
 //
 // See the LICENSE file for the full license text.
 
-//! Whole-stack tests: a disk image container, a partition map and an HFS+
-//! volume together, and deterministic damage sweeps over each layer.
+//! Whole-stack tests: a disk image container, a partition map and a volume
+//! together, and deterministic damage sweeps over each layer.
 //!
-//! The volume comes from the HFS+ test builder. It is stored as a raw file,
-//! a UDIF file, a sparse image and a sparse bundle (each written to a
+//! The HFS+ volume comes from the HFS+ test builder. It is stored as a raw
+//! file, a UDIF file, a sparse image and a sparse bundle (each written to a
 //! temporary path and opened with [`crate::image::open`]), in an Apple
 //! Partition Map disk and a GPT disk. Each combination is opened, laid out,
 //! probed, mounted and walked, and every file's content is compared with
 //! what was written.
 //!
+//! The classic HFS volume comes from the classic HFS test builder. It is
+//! stored bare and in an Apple Partition Map disk (in each of those
+//! containers), and bare inside a DiskCopy 4.2 floppy image. It goes through
+//! the same layers, and both forks of every file are compared with the
+//! builder's manifest.
+//!
 //! The sweeps overwrite or cut off bytes at fixed pseudo-random places and
-//! feed the result through the same readers. Any step may fail; none may
-//! panic or run without end. The walk and the reads are bounded, so a
-//! structure that loops ends at a bound, which is not a failure.
+//! feed the result through the same readers: HFS+ and classic HFS volumes,
+//! the image containers (UDIF, sparse image, DiskCopy 4.2) and the partition
+//! maps. Any step may fail; none may panic or run without end. The walk and
+//! the reads are bounded, so a structure that loops ends at a bound, which
+//! is not a failure.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crate::fs::hfs;
+use crate::fs::hfs::test_volume::{Built, Manifest, standard_volume};
 use crate::fs::hfsplus::compression::fixtures::{content, header, pieces, zlib, zlib_fork};
 use crate::fs::hfsplus::links::FILE_PRIVATE_FOLDER;
 use crate::fs::hfsplus::test_volume::{FileSpec, ROOT, VolumeBuilder, XattrValue};
 use crate::fs::hfsplus::{self, HfsPlus};
 use crate::fs::probe::{self, Content};
 use crate::fs::{DirBatch, DirProgress, FileSystem, JournalState, NodeId, NodeKind, Stream};
+use crate::image::dc42;
 use crate::image::sparsebundle::tests::plist_xml;
 use crate::image::sparseimage::SparseImageSource;
 use crate::image::udif::UdifSource;
@@ -183,6 +195,8 @@ struct Found {
     kind: Option<NodeKind>,
     size: Option<u64>,
     data: Option<Vec<u8>>,
+    /// The resource fork, read only when the limits ask for forks.
+    rsrc: Option<Vec<u8>>,
     target: Option<String>,
     xattrs: Vec<String>,
 }
@@ -200,6 +214,8 @@ struct Limits {
     total: u64,
     /// Keep the data read (only worth it for clean volumes).
     keep: bool,
+    /// Also read every resource fork (volumes that have them).
+    forks: bool,
 }
 
 impl Limits {
@@ -211,6 +227,7 @@ impl Limits {
             per_file: u64::MAX,
             total: u64::MAX,
             keep: true,
+            forks: false,
         }
     }
 
@@ -222,6 +239,15 @@ impl Limits {
             per_file: 1 << 20,
             total: 4 << 20,
             keep: false,
+            forks: false,
+        }
+    }
+
+    /// The same limits, reading resource forks too.
+    fn with_forks(self) -> Self {
+        Self {
+            forks: true,
+            ..self
         }
     }
 }
@@ -258,7 +284,7 @@ fn read_up_to(source: &dyn BlockSource, cap: u64, keep: bool) -> (Vec<u8>, u64, 
 
 /// Walks the whole tree of `fs`: lists every folder, reads every file's
 /// metadata, content and attributes. Every call may fail.
-fn walk(fs: &HfsPlus, limits: Limits) -> Walked {
+fn walk(fs: &dyn FileSystem, limits: Limits) -> Walked {
     let mut walked = Walked::default();
     let mut read_total = 0u64;
     let mut stack = vec![(fs.root(), String::new(), 0usize)];
@@ -320,6 +346,23 @@ fn walk(fs: &HfsPlus, limits: Limits) -> Walked {
                             }
                         }
                         Err(_) => walked.errors += 1,
+                    }
+                    // A file without a resource fork has no such stream.
+                    if limits.forks && entry.resource_size.is_none_or(|n| n > 0) {
+                        match fs.open(entry.node, Stream::Resource) {
+                            Ok(source) => {
+                                let cap =
+                                    limits.per_file.min(limits.total.saturating_sub(read_total));
+                                let (bytes, read, failed) =
+                                    read_up_to(source.as_ref(), cap, limits.keep);
+                                read_total = read_total.saturating_add(read);
+                                walked.errors += usize::from(failed);
+                                if limits.keep && !failed {
+                                    found.rsrc = Some(bytes);
+                                }
+                            }
+                            Err(_) => walked.errors += 1,
+                        }
                     }
                 }
                 if entry.is_browsable() && entry.kind == NodeKind::Directory {
@@ -534,9 +577,13 @@ enum Container {
     Udif,
     SparseImage,
     SparseBundle,
+    /// A DiskCopy 4.2 floppy image. Not in [`Container::ALL`]: it holds the
+    /// classic HFS volume only, and sits in its own tests.
+    DiskCopy42,
 }
 
 impl Container {
+    /// The containers every volume is stored in.
     const ALL: [Self; 4] = [Self::Raw, Self::Udif, Self::SparseImage, Self::SparseBundle];
 
     fn format(self) -> ImageFormat {
@@ -545,6 +592,7 @@ impl Container {
             Self::Udif => ImageFormat::Udif,
             Self::SparseImage => ImageFormat::SparseImage,
             Self::SparseBundle => ImageFormat::SparseBundle,
+            Self::DiskCopy42 => ImageFormat::DiskCopy42,
         }
     }
 
@@ -559,6 +607,7 @@ impl Container {
                 write_sparse_bundle(&temp.0, disk, 8192);
                 temp
             }
+            Self::DiskCopy42 => Temp::file("dc42", &dc42::fixtures::build(b"Atlas HD", disk, &[])),
         }
     }
 }
@@ -1062,6 +1111,344 @@ fn the_walk_stops_at_its_bounds() {
     assert!(!shallow.entries.contains_key("Docs/Sub/big.bin"));
     assert!(shallow.entries.contains_key("Docs/notes.txt"));
     assert_eq!(fs.root(), NodeId(2));
+}
+
+// ---- classic HFS ------------------------------------------------------------
+
+/// Opens `path`, reads the partition map (or takes the whole disk), probes
+/// each partition, mounts the classic HFS ones and returns them with their
+/// labels. Checks the layers on the way, as [`mount_image`] does.
+fn mount_classic(path: &Path, format: ImageFormat) -> Vec<(String, Arc<dyn FileSystem>)> {
+    let opened = image::open(path).unwrap();
+    assert_eq!(opened.format, format);
+    let source = opened.source;
+    let mut mounted = Vec::new();
+    let mut mount_one = |label: String, volume: Arc<dyn BlockSource>| {
+        let content = probe::probe(volume.as_ref()).unwrap();
+        if content != Content::Hfs {
+            assert!(
+                probe::mount(volume, content).unwrap().is_none(),
+                "{label}: {content:?}"
+            );
+            return;
+        }
+        // The registry path and the direct one agree.
+        let via_probe = probe::mount(Arc::clone(&volume), content)
+            .unwrap()
+            .expect("classic HFS has a reader")
+            .into_volume()
+            .expect("classic HFS mounts as one volume");
+        let direct = hfs::mount(volume).unwrap();
+        assert_eq!(via_probe.info().name, direct.info().name);
+        mounted.push((label, via_probe));
+    };
+    match partition::read(source.as_ref()).unwrap() {
+        Some(map) => {
+            assert!(map.damage.is_empty(), "{:?}", map.damage);
+            for p in map
+                .partitions
+                .iter()
+                .filter(|p| p.hint != TypeHint::NotData)
+            {
+                let slice = p.slice(Arc::clone(&source)).unwrap();
+                mount_one(format!("partition {}", p.number), Arc::new(slice));
+            }
+        }
+        None => mount_one("whole disk".to_string(), source),
+    }
+    mounted
+}
+
+/// Checks that `walked` is exactly the manifest's tree, with both forks of
+/// every file as the builder wrote them.
+fn assert_classic_tree(walked: &Walked, manifest: &Manifest, what: &str) {
+    assert_eq!(walked.errors, 0, "{what}: the walk met errors");
+    assert!(!walked.bound_hit, "{what}: a bound ended the walk");
+    let found: Vec<&str> = walked.entries.keys().map(String::as_str).collect();
+    let mut wanted: Vec<&str> = manifest
+        .entries
+        .iter()
+        .map(|e| e.path.trim_start_matches('/'))
+        .collect();
+    wanted.sort_unstable();
+    assert_eq!(found, wanted, "{what}: the tree differs");
+    for entry in &manifest.entries {
+        let path = entry.path.trim_start_matches('/');
+        let got = &walked.entries[path];
+        if entry.is_dir {
+            assert_eq!(got.kind, Some(NodeKind::Directory), "{what}: {path}");
+            continue;
+        }
+        assert_eq!(got.kind, Some(NodeKind::File), "{what}: {path}");
+        assert_eq!(got.size, Some(entry.data_len), "{what}: {path} size");
+        assert!(
+            got.data.as_deref() == Some(entry.data_bytes().as_slice()),
+            "{what}: {path} data fork differs"
+        );
+        if entry.rsrc_len == 0 {
+            assert!(got.rsrc.is_none(), "{what}: {path} has a resource fork");
+        } else {
+            assert!(
+                got.rsrc.as_deref() == Some(entry.rsrc_bytes().as_slice()),
+                "{what}: {path} resource fork differs"
+            );
+        }
+    }
+}
+
+/// Writes `disk` in each of `containers`, mounts the classic HFS volume in
+/// it and compares the walk, twice, with the manifest.
+fn check_classic_stack(disk: &[u8], built: &Built, containers: &[Container], what: &str) {
+    for container in containers {
+        let temp = container.write(disk);
+        let mounted = mount_classic(&temp.0, container.format());
+        assert_eq!(mounted.len(), 1, "{what} in {container:?}");
+        let (label, fs) = &mounted[0];
+        let what = format!("{what} in {container:?}, {label}");
+        assert_eq!(fs.info().name, built.manifest.volume_name, "{what}");
+        let limits = Limits::clean().with_forks();
+        assert_classic_tree(&walk(fs.as_ref(), limits), &built.manifest, &what);
+        // The same walk twice: the caches change nothing.
+        assert_classic_tree(&walk(fs.as_ref(), limits), &built.manifest, &what);
+    }
+}
+
+#[test]
+fn classic_hfs_bare_in_every_container() {
+    let built = standard_volume();
+    check_classic_stack(&built.image, &built, &Container::ALL, "bare volume");
+}
+
+#[test]
+fn classic_hfs_in_an_apm_disk_in_every_container() {
+    let built = standard_volume();
+    let disk = apm_disk(&built.image);
+    // The partition is found, typed and sized as built.
+    let map = partition::read(&MemSource::new(disk.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(map.scheme, partition::Scheme::Apm);
+    let hfs_part = map
+        .partitions
+        .iter()
+        .find(|p| p.hint == TypeHint::Hfs)
+        .unwrap();
+    assert_eq!(hfs_part.start, VOLUME_START as u64 * 512);
+    assert_eq!(hfs_part.len, built.image.len() as u64);
+    check_classic_stack(&disk, &built, &Container::ALL, "APM");
+}
+
+#[test]
+fn classic_hfs_in_a_diskcopy_42_image() {
+    let built = standard_volume();
+    let temp = Container::DiskCopy42.write(&built.image);
+    let opened = image::open(&temp.0).unwrap();
+    assert_eq!(opened.format, ImageFormat::DiskCopy42);
+    // The wrapper presents exactly the volume, with no partition map.
+    assert_eq!(opened.source.len(), built.image.len() as u64);
+    let mut got = vec![0u8; built.image.len()];
+    opened.source.read_at(0, &mut got).unwrap();
+    assert!(
+        got == built.image,
+        "the DiskCopy 4.2 image changed the volume"
+    );
+    assert!(partition::read(opened.source.as_ref()).unwrap().is_none());
+    check_classic_stack(
+        &built.image,
+        &built,
+        &[Container::DiskCopy42],
+        "DiskCopy 4.2",
+    );
+}
+
+/// Mounts `bytes` as a classic HFS volume and, if that works, exercises it
+/// and walks it, both forks included.
+fn mount_and_walk_classic(bytes: &[u8]) -> Option<Walked> {
+    let source: Arc<dyn BlockSource> = Arc::new(MemSource::new(bytes));
+    let fs = hfs::mount(source).ok()?;
+    let _ = fs.info();
+    let _ = fs.identity();
+    let _ = fs.allocation_map(64);
+    let mut seen = 0usize;
+    let _ = fs.scan(&mut |_| {
+        seen += 1;
+        if seen >= 2000 {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    Some(walk(&fs, Limits::damaged().with_forks()))
+}
+
+/// The byte range a fork-extent list covers in the volume image.
+fn extent_span(manifest: &Manifest, extents: &[(u32, u32)]) -> (usize, usize) {
+    let block = u64::from(manifest.block_size);
+    let first = extents.iter().map(|e| e.0).min().unwrap();
+    let end = extents.iter().map(|e| e.0 + e.1).max().unwrap();
+    let at = |n: u32| (manifest.alloc_start + u64::from(n) * block) as usize;
+    (at(first), at(end))
+}
+
+#[test]
+fn damaged_classic_volumes_never_panic() {
+    let started = Instant::now();
+    let built = standard_volume();
+    let m = &built.manifest;
+    let size = built.image.len();
+    let head = m.alloc_start as usize;
+    let catalog = extent_span(m, &m.catalog_extents);
+    let overflow = extent_span(m, &m.extents_extents);
+    assert!(head > 1536 && catalog.1 <= size && overflow.1 <= size);
+    // Every sector of the boot blocks, the master directory block and the
+    // bitmap; every sector of the catalog and the overflow tree, with extra
+    // spots in each; every eighth sector of the file data; and the
+    // alternate master directory block at the end.
+    let mut plan = damage_plan_in((0, head), size, 1, 100, 0x5EED_0101);
+    plan.extend(damage_plan_in(catalog, size, 1, 600, 0x5EED_0102));
+    plan.extend(damage_plan_in(overflow, size, 1, 50, 0x5EED_0103));
+    plan.extend(damage_plan_in((head, size), size, 8, 0, 0x5EED_0104));
+    plan.extend(damage_plan_in(
+        (size - 1024, size),
+        size,
+        1,
+        50,
+        0x5EED_0105,
+    ));
+    let (mut mounted, mut walked_entries, mut with_errors) = (0usize, 0usize, 0usize);
+    for damage in &plan {
+        let _ctx = Context("classic HFS overwrite", *damage);
+        let mut bytes = built.image.clone();
+        damage.apply(&mut bytes);
+        if let Some(walked) = mount_and_walk_classic(&bytes) {
+            mounted += 1;
+            walked_entries += walked.entries.len();
+            with_errors += usize::from(walked.errors > 0);
+        }
+    }
+    report(format_args!(
+        "classic HFS overwrite sweep: {} cases, {mounted} mounted, {with_errors} walks met errors, {walked_entries} entries walked, {:?}",
+        plan.len(),
+        started.elapsed()
+    ));
+    // Many overwrites land in file content or free space and change nothing
+    // that matters; the sweep would prove little if none mounted.
+    assert!(mounted > plan.len() / 4);
+}
+
+#[test]
+fn truncated_classic_volumes_never_panic() {
+    let started = Instant::now();
+    let built = standard_volume();
+    let size = built.image.len();
+    let mut rng = Rng(0x5EED_0106);
+    let mut lengths: Vec<usize> = (0..size).step_by(512).collect();
+    lengths.extend([
+        1,
+        511,
+        1023,
+        1024,
+        1025,
+        1535,
+        size - 1025,
+        size - 513,
+        size - 512,
+        size - 1,
+    ]);
+    for _ in 0..200 {
+        lengths.push(rng.below(size));
+    }
+    for len in &lengths {
+        let _ctx = Context(
+            "classic HFS truncation",
+            Damage {
+                at: *len,
+                len: 0,
+                mode: 0,
+                seed: 0,
+            },
+        );
+        let _ = mount_and_walk_classic(&built.image[..*len]);
+    }
+    report(format_args!(
+        "classic HFS truncation sweep: {} cases, {:?}",
+        lengths.len(),
+        started.elapsed()
+    ));
+}
+
+/// Opens `bytes` as a DiskCopy 4.2 file and, if that works, reads the disk
+/// and mounts what it presents. Returns whether the wrapper opened.
+fn open_diskcopy_and_mount(bytes: &[u8]) -> bool {
+    let file: Arc<dyn BlockSource> = Arc::new(MemSource::new(bytes));
+    let Ok((_header, disk)) = dc42::open_source(file) else {
+        return false;
+    };
+    let _ = dc42::checksum(&disk, 0, disk.len());
+    read_disk(&disk);
+    let disk: Arc<dyn BlockSource> = Arc::new(disk);
+    if let Ok(content) = probe::probe(disk.as_ref())
+        && let Ok(Some(probe::Mount::Volume(fs))) = probe::mount(disk, content)
+    {
+        let _ = fs.info();
+        let _ = fs.read_dir(fs.root());
+    }
+    true
+}
+
+#[test]
+fn damaged_diskcopy_42_never_panics() {
+    let started = Instant::now();
+    let built = standard_volume();
+    let bytes = dc42::fixtures::build(b"Atlas HD", &built.image, &[]);
+    assert!(open_diskcopy_and_mount(&bytes));
+    let mut opened = 0usize;
+    // The 84-byte header is the metadata: a lot of spots in the first
+    // sector, then one in every sector of the file and some more.
+    let mut plan = damage_plan_in((0, 512), bytes.len(), 1, 300, 0x5EED_0107);
+    plan.extend(damage_plan(bytes.len(), 200, 0x5EED_0108));
+    for damage in &plan {
+        let _ctx = Context("DiskCopy 4.2 overwrite", *damage);
+        let mut bad = bytes.clone();
+        damage.apply(&mut bad);
+        opened += usize::from(open_diskcopy_and_mount(&bad));
+    }
+    let mut rng = Rng(0x5EED_0109);
+    let mut lengths: Vec<usize> = (0..bytes.len()).step_by(4096).collect();
+    lengths.extend([
+        0,
+        1,
+        83,
+        84,
+        85,
+        511,
+        512,
+        bytes.len() - 512,
+        bytes.len() - 1,
+    ]);
+    for _ in 0..100 {
+        lengths.push(rng.below(bytes.len()));
+    }
+    for len in &lengths {
+        let _ctx = Context(
+            "DiskCopy 4.2 truncation",
+            Damage {
+                at: *len,
+                len: 0,
+                mode: 0,
+                seed: 0,
+            },
+        );
+        open_diskcopy_and_mount(&bytes[..*len]);
+    }
+    report(format_args!(
+        "DiskCopy 4.2 sweep: {} overwrites ({opened} opened) and {} truncations, {:?}",
+        plan.len(),
+        lengths.len(),
+        started.elapsed()
+    ));
+    // Most overwrites miss the few header bytes the reader checks.
+    assert!(opened > plan.len() / 2);
 }
 
 /// Writes the test disks in every container into the folder named by
