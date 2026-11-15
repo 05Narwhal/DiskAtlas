@@ -152,3 +152,10 @@ path = "fuzz_targets/alias_record.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ds_store"
+path = "fuzz_targets/ds_store.rs"
+test = false
+doc = false
+bench = false
