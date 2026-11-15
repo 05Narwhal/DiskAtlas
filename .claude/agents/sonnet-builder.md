@@ -16,8 +16,8 @@ A brief with: the goal, the files you own, the interfaces or design tokens to fo
 
 1. Read the brief, the files you own, and the code you must connect to. For UI work read `.claude/docs/ui-design.md`. For parser work read the named section of `.claude/docs/filesystems.md`.
 2. Build inside the files you own. Follow the patterns already in the repository: naming, module layout, error types, how existing components are written.
-3. Add the tests the brief asks for. A parser gets a byte fixture and at least one malformed-input test.
-4. Run `cargo check -p <crate>`, the focused tests, and `cargo clippy -p <crate> --all-targets -- -D warnings`.
+3. Add the tests the brief asks for, and no more (lean build policy, `.claude/docs/orchestration.md`). A parser gets one valid and one malformed-input test. No rendering or focus tests of GPUI views.
+4. Run `cargo check -p <crate>` and the focused tests. Clippy and the whole suite run at the lane checkpoint, not by you.
 
 ## Standards for this codebase
 

@@ -8,6 +8,24 @@ A milestone ends when the checks pass from the main session and Julian has tried
 
 M4 to M8 and the open items of M2 and M3 are designed in advance in `.claude/docs/design/` (start at its `README.md`). Each design ends with an ordered task table that is finer than the lines here; work from that table and tick the line here when all of its tasks are done.
 
+## Lanes (2026-11-15, the plan from here)
+
+Julian asked for the app to be finished faster without losing much quality. Two changes: the **lean build policy** in `orchestration.md` (fewer tests per task, checks and fuzzing batched at checkpoints, one-theme screenshots, no wait between milestones), and **scope cut to a core path**, with everything else moved to "Later" at the end of this file. Rules 1 to 9 in `.claude/CLAUDE.md` are unchanged.
+
+State on 2026-11-15, after the lead merged `lane-a-m5` (M5 bytes view and copy-out), `lane-c-m6` (classic HFS tasks 2 to 6) and `lane-b-r7` (R7 and R15.2) into `dev`: M0 to M4 done; M5 nearly done; R1 to R4, R7, R10 to R16, R18 done; R5 frame done; M6 done except task 7.
+
+Three lanes run in parallel, each in its own worktree and branch, owning disjoint areas. Order inside a lane is top to bottom.
+
+| Lane | Branch / worktree | Owns | Milestones, in order |
+|---|---|---|---|
+| **A: the explorer** | `lane-a-ui` / `.worktrees/lane-a` | `crates/app` views, components, state for lists, previews and host operations; `crates/lib/src/extract`, `preview` | 1. M5 finish (structure explanations wired, copy cancel, quit-while-copying prompt; last destination optional). 2. R6 thumbnails and icon view. 3. R8 host file operations with undo (`trash`). 4. R17b custom icons only (R17.7; "As arranged" R17.8 is cut, decision 35). 5. R5 platform calls: keep on top and full screen (needs Opus or the lead for the `unsafe`, as approved 2026-11-14). |
+| **B: APFS** | `lane-b-apfs` / `.worktrees/lane-b` | `crates/lib/src/fs/apfs/` and its probe registration, fuzz targets, the app's container and snapshot rows | 1. M7 container superblock, checkpoints, object maps. 2. File-system tree: listing, metadata, extents, attributes, compression. 3. Snapshots and multi-volume containers, sealed volumes. 4. Password unlock only after Julian approves the crates and gives a fixture; otherwise Later. |
+| **C: formats and Mac conventions** | `lane-c-formats` / `.worktrees/lane-c` | `crates/lib/src/fs/{fat,exfat,iso9660,udf,ext}`, `crates/lib/src/mac/`, their fuzz targets; the app's `state/facts.rs` joins | 1. M6 task 7 (local times, Mac OS Roman in the text preview and the bytes view). 2. R17a Mac conventions R17.1 to R17.6 (sidecars, bplist and xattrs, packages and labels, Trash rows, resource maps and aliases, `.DS_Store`). 3. M8 FAT and exFAT. 4. M8 ISO 9660, then UDF. 5. ext4 through `ext4-view` once Julian approves it. Q1's ICNS reader (needed by lane A's R17b) goes here, right after R17a. |
+
+After the three lanes: **lane D, release** (one session): M8 pinned folders, packaging for Windows, Linux and macOS, the first CI run (review item 3), Linux and macOS device access (M2), and a last fuzz batch over every target. Then Julian's conformance pass on real disks (M3) for HFS+, HFS and APFS together.
+
+Shared files (`Cargo.toml`, `crates/lib/src/lib.rs`, `fs/mod.rs`, `fs/probe.rs`, `keymap.rs`, `state/menus.rs`, `app.rs`): each lane adds lines, never reorders or reformats what it did not write, so the lead's merges stay mechanical.
+
 ## M0. Foundations
 
 - [x] H: Rename `crates/app/cargo.toml` and `crates/lib/cargo.toml` to `Cargo.toml`. The lowercase names build on Windows and fail on any case-sensitive filesystem, which includes Linux and CI.
@@ -42,7 +60,7 @@ Checks green from the main session on Windows (fmt, clippy with `-D warnings`, 7
 - [x] S: Raw image file source. `image::open` detects every image format from content; formats without a reader yet fail as unsupported.
 - [x] S: GPT and MBR. S: Apple Partition Map. The EBR walk is bounded by records visited, not partitions found; APM picks its block unit by walking the whole chain (see `filesystems.md`).
 - [x] S: Probe registry that names what each partition contains.
-- [ ] O: Device enumeration and raw reads on Windows, then Linux, then macOS. Windows done (listing needs no rights; the elevated read path is written but not yet run); Linux and macOS report no devices for now. Design for both: `design/m3-leftovers.md` §2.
+- [ ] O: Device enumeration and raw reads on Windows, then Linux, then macOS (Linux and macOS: lane D). Windows done (listing needs no rights; the elevated read path is written but not yet run); Linux and macOS report no devices for now. Design for both: `design/m3-leftovers.md` §2.
 - [x] F: Elevation design. S: the "needs elevation" state and relaunch. The Windows relaunch (UAC via `ShellExecuteExW`) was built by O; it is offered only when the process is not already elevated. Not yet tried against a real UAC prompt.
 - [x] S: Disk strip component with partition proportions (shading arrives in M3). Unshaded volumes are `relief` at 35%, others dimmed to 45% of that; gaps of 0.1% of the disk or more show as dashed "Free".
 - [x] S: Sidebar groups for disks and images; "Open disk image". On Windows the file prompt cannot also pick folders, so a sparse bundle (a folder) needs its own "Open disk image folder" entry once its reader exists.
@@ -124,7 +142,7 @@ Design: `design/m5-quicklook-copy.md`.
 
 Designs: `design/r1-redesign.md` (R1 to R9, Q1 to Q3, G0, G1; decisions 17 to 28) and `design/r10-everyday.md` (R10 to R18; decisions 29 to 42). Julian approved both on 2026-11-13. **The order below is the one in `r10-everyday.md` §10 and replaces the order of `r1-redesign.md` §9.** Briefs: `r10-everyday.md` §10.1 for R10 to R18 (with one brief worked through in the `orchestration.md` template), and the milestone table of `r1-redesign.md` §9 with the sections it names for the rest.
 
-Gate for every task with something to see: a screenshot of the running app in both themes, looked at by the lead before accepting; tests alone do not close it. Every new parser: a fuzz target that runs 60 s clean. A new crate is added to `Cargo.toml` only by the task named for it.
+Gate for every task with something to see: a dark-theme screenshot of the running app, looked at before accepting; both themes at the lane checkpoint (lean build policy, `orchestration.md`). Every new parser: a fuzz target with seeds, run in the checkpoint's batch. A new crate is added to `Cargo.toml` only by the task named for it.
 
 - [x] **R1** S. (Done 2026-11-13 except the Quick Look footer and toolbar buttons: they need a `QuickLook` state accessor for neighbours and index, and the buttons do not exist yet; carry to R6. Screenshot tool: `tools/screenshot/`.) Quick Look: the Space and Escape fix with its tests, layout on the grid (`r1` §5). First task: the screenshot tool goes into `tools/` (capture the app window by title, click, type). If the script from the 2026-11-13 session is gone, S writes it again in PowerShell before anything else, because every later gate needs it.
 - [x] **R2** H, then S. (Done 2026-11-13. Left over: row pressed state, line drawings, index-sweep and disconnected states, a 3D-model kind class for the Model3d glyph, remaining `metrics` constants with no token.) H folds `r1` §1 to §2 into `ui-design.md` (tokens, type, spacing, elevation, motion tokens). S: the tokens in `theme/`, twelve kind glyphs, every component moved to tokens, the states of `r1` §1.8.
@@ -141,18 +159,15 @@ Gate for every task with something to see: a screenshot of the running app in bo
 - [x] **R18** (Done 2026-11-14 except the open notice below) S. Properties (`r10` §7). The checksum section (R18.3) is approved: Julian approved decision 9 (`sha2`) on 2026-11-14, so R18.3 is part of this task, after R18.2. Code done 2026-11-14: R18.1 (`state/facts.rs`), R18.2a (section loaders), R18.2b (`state/properties.rs`, `views/properties.rs`, Alt+Enter, Ctrl+I, Ctrl+Shift+I, Properties live in every menu and the storage bar); 618 app and 801 lib tests pass, clippy clean. Screenshot gate passed 2026-11-14: a host folder (dark), a classic Mac file with type TEXT/ttxt, label and custom-icon flag (dark and light), a folder inside a disk image (dark), a volume (dark and light); the window scrolls with the wheel and keeps its header fixed. Seen but not fixed: the 32-character volume Identity wraps one digit onto a second line. R18.3 (checksum) built 2026-11-14 by sonnet-builder, reviewed by the lead: `state/checksum.rs`, `SectionId::Checksum`, "Calculate SHA-256" with progress and Cancel for single files on the host and on disks (data fork); `sha2` 0.10 declared in the workspace. 640 app tests pass. Seen in the window (dark): the button, and digests of a 3-byte, a 286 MB and a 4 GB host file, each equal to `sha256sum`. Not seen: the running bar and Cancel (a 4 GB file hashes in under 2 s on this machine), light theme, a file on a disk; the 64-digit result wraps in the value column. **Open:** the notice "Close a Properties window first.", which goes to the log until the app has a notice surface.
 - [x] **R14** (Done 2026-11-14: R14.1 `HostSizes`, R14.2 the watcher, R14.3 live rows in the app. fmt, clippy and tests green (660 app, 800 lib); Running, Exact and "over" cells seen in both themes (`r10` §14). Fable restated the flush budget to 200 µs per folder (95 µs measured, median of 3); batches merge and past `MAX_BATCH_DIRS` become one `invalidate_all`. Carried: the status-bar "not watched" tooltip, the "N folders could not be read" count, scroll offset on a merge, removable-drive detection, host drive used/free for the bar (R15). **Open for Fable:** `refocus` drops only `Background` work, so leaving a folder does not free the workers (a small folder took about 30 s behind a 1.6 TB walk), and a child folder's size followed a change in 1.13 s; both in `r10` §14.) O engine and watcher, S app. `HostSizes`, the watcher, live folder rows (`r10` §3.2, §3.3). Adds `notify = "8.2"`.
 - [ ] **R6** O pipeline, S views. Thumbnails and icon view (`r1` §1.7). This is the icon view M8 listed.
-- [ ] **R7** O, S. Disk view and space map (`r1` §3.4, §3.5), reading `IndexSizes` and `HostSizes`; with it R15.2.
+- [x] **R7** (Done 2026-11-15 with R15.2; details and what is not built under `r1` §11. fmt, clippy and tests green; layout 0.95 ms and aggregation of 1,000,001 entries 11.5 ms, both inside budget. Seen in both themes except the zoom in motion; arrow keys and the region menu are not built.) O, S. Disk view and space map (`r1` §3.4, §3.5), reading `IndexSizes` and `HostSizes`; with it R15.2.
 - [ ] **R8** O operations and undo, S interface. Host file operations (`r1` §4). Adds `trash` (Julian approved the crate on 2026-11-14; the lead still checks its licence against GPL-3.0-or-later and its maintenance before adding it).
 - [ ] **R17a** S, O. Mac conventions, tasks R17.1 to R17.6 (`r10` §5.2 to §5.4).
-- [ ] **R9** O. The device helper (`r1` §3.1 step 2, `provider-protocol.md` §8.2). Gate: its four checks with a real prompt, Julian at the keyboard, before any other work on it. Julian confirmed on 2026-11-14 that he can be there; the lead builds the checks, stops, and asks him to run them.
-- [ ] **Q1** S parsers, O PICT. Previews that need no new crate, and the 3D model parsers with their fuzz targets (`r1` §7). `resource_map.rs` and `bplist.rs` already exist from R17a.
-- [ ] **R17b** S. Custom icons and "As arranged" (R17.7, R17.8).
-- [ ] **G0** O. Spike: a `wgpu` child window under a transparent GPUI region (`r1` §7.2). Gate: the lead and Julian look at it running; if it fails, Windows uses the readback presenter.
-- [ ] **G1** O. The GPU 3D viewer. Adds `wgpu`.
-- [ ] **Q2** S. Previews with one crate each: PDF first (`r1` §7).
-- [ ] **Q3** O. Audio, video, HEIC, AVIF, JPEG XL, full RAW. Each crate is asked for on its own.
+- [ ] **R9** O. The device helper. **Moved to Later (2026-11-15):** the elevated relaunch already reads raw disks.
+- [ ] **Q1** (cut to the ICNS reader, lane C, 2026-11-15; PICT, the other no-crate previews and the 3D model parsers moved to Later) S. ICNS reader on `resource_map.rs` for R17b.
+- [ ] **R17b** S, lane A. Custom icons (R17.7). "As arranged" (R17.8) is cut (decision 35 allows it): remove `finder_layout` from the settings table when R17b is done.
+- G0, G1, Q2, Q3: **moved to Later (2026-11-15).**
 
-After R15 Julian has menus, folder sizes on the disks Disk Atlas reads and the new bar: that is the first sitting to ask him for. Then after R18, R14 and R8.
+Julian's sittings are now one per lane checkpoint (`orchestration.md`, lean build policy).
 
 ## M6. Classic HFS
 
@@ -160,9 +175,10 @@ Starts after R3 (`r1-redesign.md` §9), so the classic Mac previews land on a si
 
 Design: `design/m6-hfs.md`.
 
-- [ ] O: MDB, catalog and extents on the shared B-tree reader.
-- [ ] S: Mac OS Roman and other script encodings.
-- [ ] S: DiskCopy 4.2 images.
+- [x] O: MDB, catalog and extents on the shared B-tree reader. (Tasks 2 to 6 of `m6-hfs.md` §7 done in `lane-c-m6`, merged into `dev` 2026-11-15, with fuzz targets `hfs_mount`, `hfs_records`, `dc42`; not yet run.)
+- [x] S: Mac OS Roman and other script encodings.
+- [x] S: DiskCopy 4.2 images.
+- [ ] S: Task 7, the app: `local_times` in `format.rs`, Mac OS Roman in the text preview and the bytes view's text column. Lane C, first.
 
 ## M7. APFS, read-only
 
@@ -181,6 +197,19 @@ Design: `design/m8-formats-plugins.md`.
 - [x] F: Choose crates or in-house readers for FAT, exFAT, NTFS, ext4, ISO 9660, UDF. Checked 2026-11-12 (`design/m8-formats-plugins.md` §1): `ext4-view` 1.0.0 passes; `ntfs` 0.4.0 fails the freshness test (last release June 2023). Waiting for Julian: approve `ext4-view`, decide NTFS.
 - [ ] S or O per format: FAT, exFAT, ISO 9660 (S), ext through the crate (S), UDF (O), NTFS as Julian decides.
 - [x] F: Plugin design (the README's goal of extensions that are not compiled in). `design/provider-protocol.md`: the byte-level protocol for extensions and the elevated helper.
-- [ ] O: `ipc/` and `RemoteFs` from the specification. S: the example extension and its CI job, extensions in Settings. The elevated helper after its checks with a real prompt.
-- [ ] S: Pinned folders, extensions in Settings. (Icon view moved to R6; the settings store and window to R10a and R10b; the theme switch is a setting there.)
-- [ ] S: Packaging for Windows, Linux and macOS.
+- [ ] O: `ipc/` and `RemoteFs` from the specification. **Moved to Later (2026-11-15)**, with the example extension and extensions in Settings.
+- [ ] S: Pinned folders. Lane D.
+- [ ] S: Packaging for Windows, Linux and macOS. Lane D.
+
+## Later (moved out of the core path on 2026-11-15)
+
+Designed and approved, not cancelled: each comes back as its own lane once the core path ships. Nothing in the core path depends on them.
+
+- R9 the device helper, and the elevated helper of `provider-protocol.md`.
+- M8 plugins: `ipc/`, `RemoteFs`, the example extension, extensions in Settings.
+- G0 and G1, the GPU 3D viewer; Q1's PICT and 3D model parsers and its other previews; Q2 (PDF and one-crate previews); Q3.
+- M7 password unlock, unless Julian approves the crates and gives a fixture before lane B reaches it.
+- NTFS (decision 15).
+- R17.8 "As arranged" (cut, decision 35).
+- Multi-byte Mac scripts (decision 8).
+- Small carried items in the done lines above (R7 arrow keys and region menu, R14's "not watched" tooltip and refocus issue, R15's ellipsized labels): picked up only when a lane is already in that file.

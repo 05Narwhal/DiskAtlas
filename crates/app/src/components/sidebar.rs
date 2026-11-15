@@ -53,6 +53,7 @@ use crate::state::properties::{PropertiesTarget, PropertiesWindows, Request};
 use crate::state::sources::{
     Availability, Disk, DiskId, Source, SourceGroup, SourceId, SourceKind, Sources, SystemKind,
 };
+use crate::state::view::ViewState;
 use crate::theme::{
     Colors, Theme, metrics,
     motion::{self, Disclosure, Reveal},
@@ -200,6 +201,8 @@ enum Fold {
 pub struct Sidebar {
     sources: Entity<Sources>,
     navigation: Entity<Navigation>,
+    /// Choosing a disk heading opens the disk view.
+    view: Entity<ViewState>,
     /// Disks the user opened or closed by hand. Any other disk is open when it holds the
     /// current source.
     open: HashMap<DiskId, bool>,
@@ -230,11 +233,13 @@ impl Sidebar {
     pub fn new(
         sources: Entity<Sources>,
         navigation: Entity<Navigation>,
+        view: Entity<ViewState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
             cx.observe(&sources, |_, _, cx| cx.notify()),
+            cx.observe(&view, |_, _, cx| cx.notify()),
             cx.observe_in(&navigation, window, |this, _, window, cx| {
                 // A menu belongs to the place it was opened in.
                 this.menu.dismiss(window, cx);
@@ -248,6 +253,7 @@ impl Sidebar {
             previous: None,
             sources,
             navigation,
+            view,
             open: HashMap::new(),
             others_open: HashSet::new(),
             folds: HashMap::new(),
@@ -751,6 +757,7 @@ impl Sidebar {
             })
             .collect();
         let (hover, pressed) = (colors.hover, colors.field);
+        let showing = self.view.read(cx).disk() == Some(id);
         div()
             .id(("sidebar-disk", index))
             .flex()
@@ -764,10 +771,16 @@ impl Sidebar {
             .text_color(colors.ink2)
             .hover(move |style| style.bg(hover))
             .active(move |style| style.bg(pressed))
+            .when(showing, |row| row.bg(hover))
+            // The heading opens the disk view (and the disk's volumes, when they are folded);
+            // the chevron alone folds and unfolds.
             .on_click(cx.listener(move |this, _, _, cx| {
                 let now = this.open.get(&id).copied().unwrap_or(is_open);
-                this.open.insert(id, !now);
-                this.start_fold(Fold::Disk(id), !now, cx);
+                if !now {
+                    this.open.insert(id, true);
+                    this.start_fold(Fold::Disk(id), true, cx);
+                }
+                this.view.update(cx, |view, cx| view.show_disk(id, cx));
                 cx.notify();
             }))
             .on_mouse_down(
@@ -782,7 +795,21 @@ impl Sidebar {
                     .flex_row()
                     .items_start()
                     .gap(space::S8)
-                    .child(chevron(is_open, colors).mt(space::S4))
+                    .child(
+                        div()
+                            .id(("sidebar-fold", index))
+                            .flex_none()
+                            .mt(space::S4)
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let now = this.open.get(&id).copied().unwrap_or(is_open);
+                                this.open.insert(id, !now);
+                                this.start_fold(Fold::Disk(id), !now, cx);
+                                cx.notify();
+                            }))
+                            .child(chevron(is_open, colors)),
+                    )
                     .child(div().flex_1().min_w_0().child(disk.label.clone()))
                     .children(disk_size(disk).map(|size| detail_text(size, colors))),
             )

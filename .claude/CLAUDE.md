@@ -9,7 +9,9 @@ Two crates:
 
 Current state (2026-11-12): M0 to M4 are built (the explorer on the host filesystem, disks, images and partition maps, HFS+ and HFSX, search). M5 to M8 are designed in `.claude/docs/design/` and not built, apart from the interfaces Fable wrote ahead (the M5 trait additions and preview pipeline, the M7 mount API). The plan lives in `.claude/docs/roadmap.md`; its "Review, 2026-11-12" section lists what to do before M5.
 
-Since 2026-11-13 the next work is the R milestones, approved by Julian and ahead of M6: the redesign (`design/r1-redesign.md`) and the everyday features (`design/r10-everyday.md`: menus, Properties, Settings, folder sizes, the storage bar, Mac housekeeping files). One order for both is in the roadmap's "R" section. Sonnet can lead them; the engine tasks in R12, R13, R14 and R17 are `opus-engineer` work with the Opus review of `orchestration.md`.
+**Since 2026-11-15 the work runs as three parallel lanes on a cut-down core path** (the roadmap's "Lanes" and "Later" sections) **under the lean build policy** (`orchestration.md`): a few tests per task focused on hostile input, checks and fuzzing batched at checkpoints, no waiting between milestones. M5, M6 tasks 2–6 and R7 were merged into `dev` that day.
+
+Before that, from 2026-11-13, the work was the R milestones, approved by Julian and ahead of M6: the redesign (`design/r1-redesign.md`) and the everyday features (`design/r10-everyday.md`: menus, Properties, Settings, folder sizes, the storage bar, Mac housekeeping files). One order for both is in the roadmap's "R" section. Sonnet can lead them; the engine tasks in R12, R13, R14 and R17 are `opus-engineer` work with the Opus review of `orchestration.md`.
 
 ## Commands
 
@@ -55,7 +57,7 @@ If you are the main session: follow `.claude/docs/orchestration.md` before deleg
 
 If you are a subagent: your agent file is your job description. Do the brief you were given, nothing wider.
 
-**Cost policy (Julian, 2026-11-15):** no subagent runs on Opus, no Opus review passes, one subagent at a time, every brief has a scope and attempt budget. Details: `.claude/docs/orchestration.md` "Cost policy". Where a document says Opus does a task, read it as: the lead session does it, or `opus-engineer` (Sonnet) builds it from the design and the lead reviews.
+**Cost policy (Julian, 2026-11-15):** no subagent runs on Opus, no Opus review passes, one subagent at a time, every brief has a scope and attempt budget. Details: `.claude/docs/orchestration.md` "Cost policy". **Lean build policy (same day):** a lane session builds inline and uses a subagent only for a large self-contained task; tests and gates as in `orchestration.md` "Lean build policy". Where a document says Opus does a task, read it as: the lead session does it, or `opus-engineer` (Sonnet) builds it from the design and the lead reviews.
 
 ## Read these when the work touches them
 

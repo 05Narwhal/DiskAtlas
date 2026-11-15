@@ -1301,25 +1301,6 @@ mod tests {
     }
 
     #[test]
-    fn an_image_format_without_a_reader_is_named() {
-        // A DiskCopy 4.2 header (name length, data size, private word) and 1 KiB of data.
-        let mut bytes = vec![0u8; 84 + 1024];
-        bytes[0] = 4;
-        bytes[1..5].copy_from_slice(b"Disk");
-        bytes[64..68].copy_from_slice(&1024u32.to_be_bytes());
-        bytes[82..84].copy_from_slice(&[0x01, 0x00]);
-        let file = TempFile::new("dc42", &bytes);
-        let prepared = scan_image(file.0.clone(), &Arc::new(ChunkCache::new(1 << 20)));
-        assert!(prepared.volumes.is_empty());
-        assert_eq!(
-            prepared.whole,
-            Some(Availability::Failed(
-                "Disk Atlas cannot read DiskCopy 4.2 files yet.".into()
-            ))
-        );
-    }
-
-    #[test]
     fn an_unsupported_feature_of_a_readable_format_is_named() {
         // A UDIF trailer whose version field is 0: the format has a reader, this version does not.
         let mut bytes = vec![0u8; 2048];

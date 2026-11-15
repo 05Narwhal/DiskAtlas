@@ -42,6 +42,7 @@ use crate::state::search::{Filters, IndexState, Search, SearchEvent};
 use crate::state::settings::Settings;
 use crate::state::sizes::Sizes;
 use crate::state::sources::{Availability, SourceId, SourceKind, Sources, SourcesEvent};
+use crate::state::view::ViewState;
 use crate::theme::{
     Colors, Theme,
     glyphs::Glyph,
@@ -614,10 +615,10 @@ pub struct StorageBar {
     sizes: Entity<Sizes>,
     search: Entity<Search>,
     listing: Entity<Listing>,
+    /// Layout mode is offered in the disk view only.
+    view: Entity<ViewState>,
     /// Layout mode's drawing (`r1-redesign.md` 3.3), kept as it was.
     disk_strip: Entity<DiskStrip>,
-    /// "Layout" is chosen in the Contents | Layout switch.
-    layout_mode: bool,
     focus: FocusHandle,
     /// The piece the pointer is on; the others of its partition dim.
     hover: Option<Piece>,
@@ -657,13 +658,18 @@ struct Prev {
 
 impl StorageBar {
     /// Draws the disk of the current location. `search` and `listing` carry out a click on a
-    /// kind; `sizes` holds the bytes per kind.
+    /// kind; `sizes` holds the bytes per kind; `view` says whether the disk view is open.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the bar reads these entities and nothing else"
+    )]
     pub fn new(
         sources: Entity<Sources>,
         navigation: Entity<Navigation>,
         sizes: Entity<Sizes>,
         search: Entity<Search>,
         listing: Entity<Listing>,
+        view: Entity<ViewState>,
         disk_strip: Entity<DiskStrip>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -672,6 +678,7 @@ impl StorageBar {
             cx.observe(&navigation, |_, _, cx| cx.notify()),
             cx.observe(&sizes, |_, _, cx| cx.notify()),
             cx.observe(&listing, |_, _, cx| cx.notify()),
+            cx.observe(&view, |_, _, cx| cx.notify()),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
             cx.subscribe(&sources, |_, _, _: &SourcesEvent, cx| cx.notify()),
             cx.subscribe(&search, |this, _, event: &SearchEvent, cx| {
@@ -687,8 +694,8 @@ impl StorageBar {
             sizes,
             search,
             listing,
+            view,
             disk_strip,
-            layout_mode: false,
             focus: cx.focus_handle().tab_stop(true),
             hover: None,
             cursor: 0,
@@ -777,9 +784,7 @@ impl StorageBar {
                     format!("Show the largest {}", piece_name(Piece::Kind(class))),
                     ShowLargest,
                 ),
-                // The space map (R7) does not exist yet: greyed.
-                MenuItem::action("Show on the space map", ShowOnSpaceMap)
-                    .disabled("The space map is not built yet."),
+                MenuItem::action("Show on the space map", ShowOnSpaceMap),
             ],
             Act::Nothing => return,
         };
@@ -807,6 +812,14 @@ impl StorageBar {
     fn choose(&mut self, _: &OpenPartition, _: &mut Window, cx: &mut Context<Self>) {
         let act = self.menu_act;
         self.perform(act, cx);
+    }
+
+    /// "Show on the space map": the map, with the kind's regions emphasised.
+    fn show_on_map(&mut self, _: &ShowOnSpaceMap, _: &mut Window, cx: &mut Context<Self>) {
+        if let Act::Search(class) = self.menu_act {
+            self.view
+                .update(cx, |view, cx| view.show_kind_on_map(class, cx));
+        }
     }
 
     fn choose_kind(&mut self, _: &ShowLargest, _: &mut Window, cx: &mut Context<Self>) {
@@ -1090,7 +1103,7 @@ fn detail_of(size: u64) -> String {
 }
 
 /// True for the top of a drive: `C:\`, `/`, or a mount under the usual mount folders.
-fn is_drive_root(root: &std::path::Path) -> bool {
+pub(crate) fn is_drive_root(root: &std::path::Path) -> bool {
     if root.parent().is_none() {
         return true;
     }
@@ -1139,8 +1152,10 @@ impl Render for StorageBar {
             self.stops.clear();
             return div().id("storage-bar");
         };
-        let switch = model.is_disk.then(|| self.mode_switch(&colors, cx));
-        if self.layout_mode && model.is_disk {
+        // Contents | Layout belongs to the disk view.
+        let in_disk_view = self.view.read(cx).disk().is_some();
+        let switch = (model.is_disk && in_disk_view).then(|| self.mode_switch(&colors, cx));
+        if self.view.read(cx).layout_mode() && model.is_disk && in_disk_view {
             // Layout mode: the strip of r1-redesign.md 3.3, unchanged, with the switch over it.
             self.stops.clear();
             return div()
@@ -1354,6 +1369,7 @@ impl Render for StorageBar {
             }))
             .on_action(cx.listener(Self::choose))
             .on_action(cx.listener(Self::choose_kind))
+            .on_action(cx.listener(Self::show_on_map))
             .on_action(cx.listener(Self::partition_properties))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let last = this.stops.len().saturating_sub(1);
@@ -1528,7 +1544,7 @@ impl StorageBar {
 
     /// The "Contents | Layout" switch of a disk view (`r10-everyday.md` 4, `r1-redesign.md` 3.4).
     fn mode_switch(&self, colors: &Colors, cx: &mut Context<Self>) -> Div {
-        let layout_mode = self.layout_mode;
+        let layout_mode = self.view.read(cx).layout_mode();
         let option = |label: &'static str, layout: bool, cx: &mut Context<Self>| {
             let active = layout_mode == layout;
             div()
@@ -1544,10 +1560,8 @@ impl StorageBar {
                         .hover(|style| style.bg(colors.hover))
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    if this.layout_mode != layout {
-                        this.layout_mode = layout;
-                        cx.notify();
-                    }
+                    this.view
+                        .update(cx, |view, cx| view.set_layout_mode(layout, cx));
                 }))
                 .child(label)
         };

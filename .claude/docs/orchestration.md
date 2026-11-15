@@ -13,6 +13,29 @@ Opus subagents burned the usage limit within minutes. So:
 - **The lead does the thinking** (the session model Julian picked). Subagents build from a finished design.
 - Run `graphify query` before reading source, as the hooks demand.
 
+## Lean build policy (Julian, 2026-11-15, overrides the designs' test lists and the gates below)
+
+The plan was spending more time on proof than on product. From now on:
+
+**Tests, per task**
+- **Engine parsers of on-disk bytes** (rule 2 is not traded): one test with valid input (round trip or a fixture) and one with malformed input (truncated or out-of-range). Add a fuzz target and seeds as before, but do not run it as a gate on the task: fuzzing runs in one batch per lane checkpoint in WSL (see "Batched checks").
+- **Other engine code** (sizes, watcher, extract, search): two or three tests of the core behaviour and the one edge case most likely to be wrong. No `#[ignore]` timing test unless the task's design names a budget that is in doubt; then one timing, printed once.
+- **App code**: test only pure logic that has real branches (layout maths, sorting, parsers of settings, state machines). No `TestAppContext` tests of rendering, focus or menus, and no table test that lists every label or row. A menu or view is checked by looking at it.
+- **The design files' "Tests:" lists are a menu, not a checklist.** Pick the cases that cover hostile input and the hardest branch; skip the rest without noting it.
+
+**Checks, per task**: `cargo check -p <crate>` and the focused tests (`cargo test -p <crate> <filter>`). Clippy, fmt and `cargo test --workspace` run once at a lane checkpoint, not after every task.
+
+**UI gate**: one screenshot of the running app in the dark theme per task with something to see. Both themes once per lane checkpoint, on the screens that changed.
+
+**Batched checks, at each lane checkpoint** (about every two milestones): `cargo fmt --all`, clippy `-D warnings`, `cargo test --workspace`, the light-theme screenshots, and, when the lane added a parser, its fuzz targets for 60 s each in WSL. A fuzz crash is fixed in the next task.
+
+**Process**
+- **Do it inline first.** A lane session builds its own tasks. A subagent is used only for a task that is large, self-contained, and whose brief is much shorter than the work (for example a whole format reader); one at a time, as the cost policy says. Never one subagent per subtask.
+- **"Verify first" items** stay only for GPUI calls (rule 6) and for on-disk offsets in a parser. Everything else is trusted from the design.
+- **Records are short.** A roadmap line gets one sentence of what was built and one of what is left. "Changes during build" holds only what changes how later work is done.
+- **Julian looks at the app once per lane checkpoint**, not once per milestone; the lane keeps working while it waits, unless what he is asked about blocks the next task.
+- **Parallel lanes** work in `.worktrees/lane-*` on their own branches, own disjoint areas (see the roadmap's "Lanes"), commit freely, never push, and never merge into `dev` themselves: at a checkpoint they rebase onto `dev` and report "ready to merge"; the lead session merges and runs the batched checks.
+
 **Since 2026-11-12 the main session is Opus or Sonnet, not Fable.** The expensive thinking has happened: it is in `.claude/docs/design/`. Read "Fable" in this file as "the lead", with three differences:
 
 - **The lead does not design.** Where this file says Fable decides, the design file has already decided. A gap the design leaves is the lead's to fill when it is small (a name, a place for a helper, an error message) and is recorded under "Changes during build". A gap that changes a public interface, a data layout, a threading rule or a security bound is a stop-and-ask (`design/README.md` rule 4).
@@ -90,12 +113,12 @@ Paste interface code into the brief rather than describing it. Give byte offsets
 
 ## Review gate
 
-Nothing counts as done on a subagent's word.
+Nothing counts as done on a subagent's word. (The lean build policy above sets how much testing and checking each step needs.)
 
 1. Read the diff. For `crates/lib`, check every disk-derived value is validated, every loop is bounded, and the tests include malformed input.
-2. Run `cargo check --workspace`, the relevant tests and clippy from the main session.
+2. Run `cargo check -p <crate>` and the focused tests; clippy and the whole suite at the lane checkpoint.
 3. If it is wrong: small fix, do it inline; wrong approach, send it back to the same agent with what was wrong; too hard for the tier, re-route upward with the failed attempt as context.
-4. UI changes are not verified by tests. From R1 on (`design/r1-redesign.md` §9): the lead runs the app, takes a screenshot of the result in both themes with the tool in `tools/`, and looks at it before accepting. Julian still tries each milestone with `cargo run -p disk-atlas`; say exactly what to look at.
+4. UI changes are not verified by tests. The lead runs the app, takes a dark-theme screenshot with the tool in `tools/screenshot/`, and looks at it before accepting; both themes at the checkpoint. Julian tries the app at each lane checkpoint with `cargo run -p disk-atlas`; say exactly what to look at.
 
 ## Escalation and cost
 
@@ -106,4 +129,4 @@ Nothing counts as done on a subagent's word.
 
 ## Milestones
 
-Work through `.claude/docs/roadmap.md` one milestone at a time. At the end of a milestone: all checks green from the main session, roadmap boxes updated, a short summary to Julian of what works, what was deferred and what he should try. Then wait for his go-ahead before the next milestone.
+Work through your lane in `.claude/docs/roadmap.md` ("Lanes"), one milestone after another without waiting for a go-ahead between them. At a checkpoint (about every two milestones): rebase onto `dev`, run the batched checks, update the roadmap lines, and send Julian a short summary of what works, what was cut and what to try. Keep going on the next milestone unless his answer is needed for it.

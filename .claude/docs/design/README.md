@@ -35,6 +35,8 @@ What is left that is not ordinary execution. None of it needs Fable by default; 
 
 ## How to use these
 
+**Since 2026-11-15 the lean build policy in `orchestration.md` overrides every "Tests:", "Screenshot:", fuzz and timing line in these files**: their test lists are a menu to pick the hostile-input and hardest-branch cases from, screenshots are dark theme per task, fuzzing and timings are batched at lane checkpoints. Scope and order come from the roadmap's "Lanes"; items it moves to "Later" are not built now.
+
 1. **The lead model's job changes from design to execution.** For each task: copy the brief, paste in the interface code from the design file, add the current line numbers of the files named, send it to the tier named. Review with the gate in `orchestration.md`. Do not redesign; where the design is wrong, see rule 4.
 2. **Order inside a milestone** is the order of the task list at the end of each file. Tasks marked "parallel" own disjoint files and may run together after the stubs task.
 3. **Every design lists "Verify first" items.** These are facts the design depends on that were written from memory of a specification or of the GPUI source and must be confirmed against the primary source before code is written (rule 6 for GPUI, `filesystems.md` for formats). The brief for that task must include the verify step. If the source disagrees with the design on a number or a field offset, the source wins and the design file is corrected in the same change. That is not a redesign.
