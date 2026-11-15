@@ -33,6 +33,7 @@ use crate::state::navigation::Navigation;
 use crate::state::order::SortSpec;
 use crate::state::properties::{PropertiesTarget, PropertiesWindows, Request};
 use crate::state::sources::Sources;
+use crate::state::view::{ViewMode, ViewState};
 use crate::theme::{
     Colors, Theme, metrics,
     scale::{radius, size, space},
@@ -43,6 +44,8 @@ pub struct TitleBar {
     navigation: Entity<Navigation>,
     sources: Entity<Sources>,
     search_field: Entity<SearchField>,
+    /// Which layout the view buttons show as chosen.
+    view: Entity<ViewState>,
     /// Holds the focus while a breadcrumb menu is open, so a chosen item reaches this view.
     focus: FocusHandle,
     /// The breadcrumb's context menu, while one is open.
@@ -60,9 +63,11 @@ impl TitleBar {
         navigation: Entity<Navigation>,
         sources: Entity<Sources>,
         search_field: Entity<SearchField>,
+        view: Entity<ViewState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
         let subscription = cx.observe_in(&navigation, window, |this, _, window, cx| {
             // A menu belongs to the path it was opened on.
             this.menu.dismiss(window, cx);
@@ -72,6 +77,7 @@ impl TitleBar {
             navigation,
             sources,
             search_field,
+            view,
             focus: cx.focus_handle(),
             menu: MenuSlot::default(),
             depth: 0,
@@ -263,6 +269,35 @@ fn nav_button(
     }
 }
 
+/// One of the two layout buttons: `chosen` fills it.
+fn view_button(
+    id: &'static str,
+    glyph: &'static str,
+    chosen: bool,
+    colors: Colors,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(size::CONTROL)
+        .rounded(radius::ROW)
+        .occlude()
+        .cursor_pointer()
+        .when(chosen, |button| button.bg(colors.field))
+        .hover(|style| style.bg(colors.hover))
+        .on_click(on_click)
+        .child(
+            svg()
+                .path(glyph)
+                .size(metrics::ICON_SMALL)
+                .text_color(if chosen { colors.ink } else { colors.ink2 }),
+        )
+}
+
 /// A Windows caption button. Windows itself acts on the click (the control area maps to a
 /// non-client hit-test code), so there is no click handler.
 fn caption_button(
@@ -296,6 +331,7 @@ impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::get(cx).colors;
         let navigation = self.navigation.read(cx);
+        let mode = self.view.read(cx).mode();
         let can_go_back = navigation.can_go_back();
         let can_go_forward = navigation.can_go_forward();
         let names: Vec<SharedString> = navigation
@@ -404,6 +440,32 @@ impl Render for TitleBar {
                     // Without this the bar's Drag layer would win the hit test over the field.
                     .occlude()
                     .child(self.search_field.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .child(view_button(
+                        "view-list",
+                        icon::LIST_VIEW,
+                        mode == ViewMode::List,
+                        colors,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.view
+                                .update(cx, |view, cx| view.set_mode(ViewMode::List, cx));
+                        }),
+                    ))
+                    .child(view_button(
+                        "view-icons",
+                        icon::ICON_VIEW,
+                        mode == ViewMode::Icons,
+                        colors,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.view
+                                .update(cx, |view, cx| view.set_mode(ViewMode::Icons, cx));
+                        }),
+                    )),
             )
             // Out of the row's flow, so the gap does not open while the menu is shown.
             .children(self.menu.entity().map(|menu| div().absolute().child(menu)))

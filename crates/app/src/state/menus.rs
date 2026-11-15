@@ -373,6 +373,7 @@ fn folder_menu(source: &SourceFacts, in_search: bool, state: &MenuState) -> Vec<
     let mut view = Vec::new();
     if state.built.space_map {
         view.push(MenuItem::action("List", workspace::ShowList));
+        view.push(MenuItem::action("Icons", workspace::ShowIcons));
         view.push(MenuItem::action("Space map", workspace::ShowSpaceMap));
     }
     if state.built.visibility_toggles {

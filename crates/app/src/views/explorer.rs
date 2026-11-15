@@ -38,18 +38,21 @@ use crate::components::file_row::{
     FileRow, FolderCache, columns, folder_cell, kind_cell, modified_cell, name_cell, resource_cell,
     row_frame, size_cell,
 };
+use crate::components::icon_tile::IconTile;
 use crate::components::menu::MenuSlot;
 use crate::components::toolbar::FilterRow;
 use crate::elevation::{self, Restart};
 use crate::keymap::{
     BUTTON, FILE_LIST, context, controls, file_list, menu as menu_keys, quick_look,
 };
+use crate::state::icon_grid;
 use crate::state::listing::{Click, Listing, ListingEvent, LoadState, Motion};
 use crate::state::menus::{
     BUILT, MAX_ROW_FACTS, MenuState, MenuTarget, RowFacts, build, file_manager_name,
 };
 use crate::state::order::{SortColumn, SortSpec};
 use crate::state::search::{Search, SearchEvent};
+use crate::state::view::{ViewEvent, ViewMode, ViewState};
 use crate::state::sources::{Availability, SourceId};
 use crate::theme::{
     Colors, Theme, metrics,
@@ -312,6 +315,12 @@ fn row_text(listing: &Listing, position: usize, kind: CopyKind, cx: &App) -> Opt
 /// The file list view.
 pub struct Explorer {
     listing: Entity<Listing>,
+    /// Whether the folder is drawn as a list or as tiles.
+    view: Entity<ViewState>,
+    /// Width of the area the tiles fill, as the last frame measured it.
+    grid_width: Rc<Cell<Pixels>>,
+    /// Tiles across in the icon view, from `grid_width`.
+    grid_columns: usize,
     search: Entity<Search>,
     /// The filter controls above the column header, shown while a search is active.
     filter_row: Entity<FilterRow>,
@@ -361,6 +370,7 @@ impl Explorer {
     /// `search` is active.
     pub fn new(
         listing: Entity<Listing>,
+        view: Entity<ViewState>,
         search: Entity<Search>,
         filter_row: Entity<FilterRow>,
         window: &mut Window,
@@ -368,6 +378,11 @@ impl Explorer {
     ) -> Self {
         let subscriptions = vec![
             cx.subscribe(&search, |_, _, _: &SearchEvent, cx| cx.notify()),
+            cx.subscribe(&view, |this, _, _: &ViewEvent, cx| {
+                // The other layout has other row heights: start at the top.
+                this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            }),
             cx.observe_in(&listing, window, |this, listing, window, cx| {
                 // A menu belongs to the folder it was opened in.
                 if this.follow_folder(&listing, cx) {
@@ -386,6 +401,9 @@ impl Explorer {
         ];
         Self {
             listing,
+            view,
+            grid_width: Rc::new(Cell::new(Pixels::ZERO)),
+            grid_columns: icon_grid::UNMEASURED_COLUMNS,
             search,
             filter_row,
             ranges: Vec::new(),
@@ -435,16 +453,49 @@ impl Explorer {
         false
     }
 
+    /// True while the folder is drawn as tiles.
+    fn icons(&self, cx: &App) -> bool {
+        self.view.read(cx).mode() == ViewMode::Icons
+    }
+
+    /// Side of a tile: the roomy density draws larger ones.
+    fn tile_side() -> f32 {
+        match Density::default() {
+            Density::Roomy => icon_grid::TILE_ROOMY,
+            Density::Compact | Density::Regular => icon_grid::TILE_REGULAR,
+        }
+    }
+
+    /// Height of one scrolled item: a list row, or a row of tiles.
+    fn item_height(&self, cx: &App) -> Pixels {
+        if self.icons(cx) {
+            px(icon_grid::row_height(Self::tile_side()))
+        } else {
+            Density::default().row_height()
+        }
+    }
+
+    /// The scrolled item that holds list `position`.
+    fn item_of(&self, position: usize, cx: &App) -> usize {
+        if self.icons(cx) {
+            icon_grid::row_of(position, self.grid_columns)
+        } else {
+            position
+        }
+    }
+
     /// Scrolls the cursor row into view with the smallest movement: nothing if it is fully
     /// visible, otherwise to the nearer edge.
     fn reveal_cursor(&mut self, cx: &mut Context<Self>) {
         let Some(position) = self.listing.read(cx).cursor() else {
             return;
         };
+        let item = self.item_of(position, cx);
+        let item_height = self.item_height(cx);
         let above = {
             let state = self.scroll.0.borrow();
             let top = -state.base_handle.offset().y;
-            Density::default().row_height() * position < top
+            item_height * item < top
         };
         // A non-strict scroll does nothing for a fully visible row; for one out of view, the
         // strategy names the edge it lands on.
@@ -453,21 +504,26 @@ impl Explorer {
         } else {
             ScrollStrategy::Bottom
         };
-        self.scroll.scroll_to_item(position, strategy);
+        self.scroll.scroll_to_item(item, strategy);
         cx.notify();
     }
 
-    /// Whole rows visible in the list, at least one.
-    fn page_rows(&self) -> usize {
+    /// Whole positions visible in the list, at least one: in the icon view, whole rows of tiles.
+    fn page_rows(&self, cx: &App) -> usize {
         let height = self
             .scroll
             .0
             .borrow()
             .last_item_size
             .map(|size| size.item.height);
-        height.map_or(1, |height| {
-            (height / Density::default().row_height()).floor().max(1.0) as usize
-        })
+        let rows = height.map_or(1, |height| {
+            (height / self.item_height(cx)).floor().max(1.0) as usize
+        });
+        if self.icons(cx) {
+            rows * self.grid_columns
+        } else {
+            rows
+        }
     }
 
     fn move_cursor(&mut self, motion: Motion, extend: bool, cx: &mut Context<Self>) {
@@ -475,7 +531,7 @@ impl Explorer {
         self.listing
             .update(cx, |listing, cx| listing.move_cursor(motion, extend, cx));
         let to = self.listing.read(cx).cursor();
-        let one_step = !extend && matches!(motion, Motion::Up | Motion::Down);
+        let one_step = !extend && matches!(motion, Motion::Up | Motion::Down) && !self.icons(cx);
         let now = Instant::now();
         self.glide = None;
         if one_step
@@ -506,20 +562,62 @@ impl Explorer {
         self.last_step = one_step.then_some(now);
     }
 
+    /// One step up (`forward == false`) or down: a row of the list, or a whole row of tiles.
+    fn step_vertical(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        let motion = if !self.icons(cx) {
+            if forward { Motion::Down } else { Motion::Up }
+        } else if forward {
+            Motion::PageDown(self.grid_columns)
+        } else {
+            Motion::PageUp(self.grid_columns)
+        };
+        self.move_cursor(motion, extend, cx);
+    }
+
+    /// One tile left or right. Does nothing in the list, where the keys are not bound.
+    fn step_across(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        if !self.icons(cx) {
+            cx.propagate();
+            return;
+        }
+        self.move_cursor(if forward { Motion::Down } else { Motion::Up }, extend, cx);
+    }
+
     fn move_up(&mut self, _: &file_list::MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Up, false, cx);
+        self.step_vertical(false, false, cx);
     }
 
     fn move_down(&mut self, _: &file_list::MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Down, false, cx);
+        self.step_vertical(true, false, cx);
+    }
+
+    fn move_left(&mut self, _: &file_list::MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(false, false, cx);
+    }
+
+    fn move_right(&mut self, _: &file_list::MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(true, false, cx);
+    }
+
+    fn select_left(&mut self, _: &file_list::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(false, true, cx);
+    }
+
+    fn select_right(
+        &mut self,
+        _: &file_list::SelectRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_across(true, true, cx);
     }
 
     fn page_up(&mut self, _: &file_list::PageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::PageUp(self.page_rows()), false, cx);
+        self.move_cursor(Motion::PageUp(self.page_rows(cx)), false, cx);
     }
 
     fn page_down(&mut self, _: &file_list::PageDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::PageDown(self.page_rows()), false, cx);
+        self.move_cursor(Motion::PageDown(self.page_rows(cx)), false, cx);
     }
 
     fn move_to_first(
@@ -536,11 +634,11 @@ impl Explorer {
     }
 
     fn select_up(&mut self, _: &file_list::SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Up, true, cx);
+        self.step_vertical(false, true, cx);
     }
 
     fn select_down(&mut self, _: &file_list::SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Down, true, cx);
+        self.step_vertical(true, true, cx);
     }
 
     fn select_page_up(
@@ -549,7 +647,7 @@ impl Explorer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_cursor(Motion::PageUp(self.page_rows()), true, cx);
+        self.move_cursor(Motion::PageUp(self.page_rows(cx)), true, cx);
     }
 
     fn select_page_down(
@@ -558,7 +656,7 @@ impl Explorer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_cursor(Motion::PageDown(self.page_rows()), true, cx);
+        self.move_cursor(Motion::PageDown(self.page_rows(cx)), true, cx);
     }
 
     fn select_to_first(
@@ -790,7 +888,7 @@ impl Explorer {
             (listing.cursor(), listing.selected_count())
         };
         let Some(position) = cursor else {
-            let at = self.row_anchor(0);
+            let at = self.row_anchor(0, self.icons(cx));
             self.right_press_empty(at, window, cx);
             return;
         };
@@ -799,7 +897,7 @@ impl Explorer {
                 listing.click(position, Click::Replace, cx)
             });
         }
-        let at = self.row_anchor(position);
+        let at = self.row_anchor(position, self.icons(cx));
         if let Some(target) = self.rows_target(cx) {
             self.show_menu(&target, at, window, cx);
         }
@@ -807,10 +905,19 @@ impl Explorer {
 
     /// Where a menu opened from the keyboard goes: inside the name column, under the row's
     /// middle, so the menu does not cover the row.
-    fn row_anchor(&self, position: usize) -> Point<Pixels> {
+    fn row_anchor(&self, position: usize, icons: bool) -> Point<Pixels> {
         let state = self.scroll.0.borrow();
         let bounds = state.base_handle.bounds();
         let offset = state.base_handle.offset();
+        if icons {
+            let side = Self::tile_side();
+            let columns = self.grid_columns.max(1);
+            let (row, column) = (position / columns, position % columns);
+            return point(
+                bounds.left() + px(icon_grid::INSET + (side + icon_grid::GAP) * column as f32 + side / 2.0),
+                bounds.top() + offset.y + px(icon_grid::row_height(side)) * row as f32 + px(side),
+            );
+        }
         let row = Density::default().row_height();
         point(
             bounds.left() + space::S48,
@@ -978,6 +1085,61 @@ impl Explorer {
         let visible = range_for_visible;
         cx.defer(move |cx| {
             listing.update(cx, |listing, cx| listing.note_visible(visible, cx));
+        });
+        rows
+    }
+
+    /// The rows of tiles in the visible `range`: one element per grid row.
+    fn render_tiles(
+        &mut self,
+        range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let columns = self.grid_columns;
+        let side = Self::tile_side();
+        let listing = self.listing.read(cx);
+        let len = listing.len();
+        let rows = range
+            .clone()
+            .map(|grid_row| {
+                let tiles = icon_grid::positions(grid_row, columns, len)
+                    .filter_map(|position| {
+                        let row = listing.row(position)?;
+                        Some(
+                            IconTile::new(&row, position, px(side))
+                                .system(listing.system_of(&row))
+                                .on_mouse_down(cx.listener(
+                                    move |this, event: &MouseDownEvent, _, cx| {
+                                        this.press_row(position, event, cx);
+                                    },
+                                ))
+                                .on_context_menu(cx.listener(
+                                    move |this, event: &MouseDownEvent, window, cx| {
+                                        this.right_press_row(position, event, window, cx);
+                                    },
+                                ))
+                                .into_any_element(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                div()
+                    .w_full()
+                    .h(px(icon_grid::row_height(side)))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .gap(px(icon_grid::GAP))
+                    .px(px(icon_grid::INSET))
+                    .children(tiles)
+                    .into_any_element()
+            })
+            .collect();
+        let first = icon_grid::positions(range.start, columns, len).start;
+        let last = icon_grid::positions(range.end.saturating_sub(1), columns, len).end;
+        let listing = self.listing.clone();
+        cx.defer(move |cx| {
+            listing.update(cx, |listing, cx| listing.note_visible(first..last, cx));
         });
         rows
     }
@@ -1418,8 +1580,19 @@ impl Render for Explorer {
         };
         let note = listing.note().cloned();
 
-        let list = uniform_list("file-list", count, cx.processor(Self::render_rows))
-            .track_scroll(self.scroll.clone())
+        let icons = self.icons(cx);
+        let list = if icons {
+            let width = f32::from(self.grid_width.get());
+            self.grid_columns = icon_grid::columns_for(width, Self::tile_side());
+            uniform_list(
+                "icon-grid",
+                icon_grid::row_count(count, self.grid_columns),
+                cx.processor(Self::render_tiles),
+            )
+        } else {
+            uniform_list("file-list", count, cx.processor(Self::render_rows))
+        }
+        .track_scroll(self.scroll.clone())
             .size_full()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1444,6 +1617,22 @@ impl Render for Explorer {
             })
             .children(plate)
             .child(list)
+            .when(icons, |area| {
+                // Measures the width the tiles flow in; a change draws the next frame again.
+                let width = self.grid_width.clone();
+                area.child(
+                    canvas(
+                        move |bounds, window, _| {
+                            if width.replace(bounds.size.width) != bounds.size.width {
+                                window.refresh();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .children(message.map(|(title, detail)| {
                 let area = div()
                     .absolute()
@@ -1476,6 +1665,10 @@ impl Render for Explorer {
             }))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::move_left))
+            .on_action(cx.listener(Self::move_right))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::page_up))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::move_to_first))
@@ -1543,7 +1736,7 @@ impl Render for Explorer {
             .flex_col()
             .overflow_hidden()
             // A source that cannot be browsed has no columns to show.
-            .when(unavailable.is_none(), |view| {
+            .when(unavailable.is_none() && !icons, |view| {
                 view.child(self.render_header(sort, resource_column, in_results, &colors, cx))
             })
             .child(list_area)

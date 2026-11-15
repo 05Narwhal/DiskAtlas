@@ -232,6 +232,14 @@ pub mod file_list {
             SelectToFirst,
             /// Extend the selection to the last row.
             SelectToLast,
+            /// Icon view: cursor one tile left.
+            MoveLeft,
+            /// Icon view: cursor one tile right.
+            MoveRight,
+            /// Icon view: extend the selection one tile left.
+            SelectLeft,
+            /// Icon view: extend the selection one tile right.
+            SelectRight,
             /// Open the folder under the cursor.
             Open,
             /// Select every row.
@@ -407,6 +415,8 @@ pub mod workspace {
             CopyToComputer,
             /// Show the folder as a list (Ctrl+1).
             ShowList,
+            /// Show the folder as icons (Ctrl+2).
+            ShowIcons,
             /// Show the folder as the space map (Ctrl+3).
             ShowSpaceMap,
             /// Open the disk view in Layout mode: where the selected file lies on the disk.
@@ -460,6 +470,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("pagedown", PageDown, list),
         KeyBinding::new("home", MoveToFirst, list),
         KeyBinding::new("end", MoveToLast, list),
+        KeyBinding::new("left", MoveLeft, list),
+        KeyBinding::new("right", MoveRight, list),
+        KeyBinding::new("shift-left", SelectLeft, list),
+        KeyBinding::new("shift-right", SelectRight, list),
         KeyBinding::new("shift-up", SelectUp, list),
         KeyBinding::new("shift-down", SelectDown, list),
         KeyBinding::new("shift-pageup", SelectPageUp, list),
@@ -500,6 +514,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-.", ToggleHidden, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-1", ShowList, None),
+        KeyBinding::new("secondary-2", ShowIcons, None),
         KeyBinding::new("secondary-3", ShowSpaceMap, None),
         // Ctrl on every platform, as the design says: Cmd+Tab is the system's.
         KeyBinding::new("ctrl-tab", quick_look::NextTab, None),

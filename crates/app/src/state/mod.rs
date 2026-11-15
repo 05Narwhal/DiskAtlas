@@ -18,6 +18,7 @@
 pub mod bytes;
 pub mod checksum;
 pub mod facts;
+pub mod icon_grid;
 pub mod listing;
 pub mod loader;
 pub mod menus;

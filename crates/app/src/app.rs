@@ -37,7 +37,7 @@ use crate::components::{
 };
 use crate::keymap::workspace::{
     CopyToComputer, FocusNext, FocusPrev, GoBack, GoForward, GoUp, LeaveSearch, OpenImage,
-    OpenImageFolder, OpenSettings, Properties, Refresh, Search as FocusSearch, ShowList,
+    OpenImageFolder, OpenSettings, Properties, Refresh, Search as FocusSearch, ShowIcons, ShowList,
     ShowOnDisk, ShowSpaceMap, ToggleDetails, ToggleHidden, ToggleSystemItems,
 };
 use crate::keymap::{context, file_list, quick_look};
@@ -117,16 +117,17 @@ impl Workspace {
 
         let search_field =
             cx.new(|cx| SearchField::new(search.clone(), listing.clone(), navigation.clone(), cx));
+        let view_state = cx.new(|cx| ViewState::new(sources.clone(), navigation.clone(), cx));
         let titlebar = cx.new(|cx| {
             TitleBar::new(
                 navigation.clone(),
                 sources.clone(),
                 search_field.clone(),
+                view_state.clone(),
                 window,
                 cx,
             )
         });
-        let view_state = cx.new(|cx| ViewState::new(sources.clone(), navigation.clone(), cx));
         let sidebar = cx.new(|cx| {
             Sidebar::new(
                 sources.clone(),
@@ -170,6 +171,7 @@ impl Workspace {
         let explorer = cx.new(|cx| {
             Explorer::new(
                 listing.clone(),
+                view_state.clone(),
                 search.clone(),
                 filter_row.clone(),
                 window,
@@ -386,6 +388,13 @@ impl Workspace {
     fn show_list(&mut self, _: &ShowList, window: &mut Window, cx: &mut Context<Self>) {
         self.view_state
             .update(cx, |view, cx| view.set_mode(ViewMode::List, cx));
+        window.focus(&self.explorer.focus_handle(cx));
+    }
+
+    /// Ctrl+2: the folder as icons. The explorer draws both, so it keeps the focus.
+    fn show_icons(&mut self, _: &ShowIcons, window: &mut Window, cx: &mut Context<Self>) {
+        self.view_state
+            .update(cx, |view, cx| view.set_mode(ViewMode::Icons, cx));
         window.focus(&self.explorer.focus_handle(cx));
     }
 
@@ -726,6 +735,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_properties))
             .on_action(cx.listener(Self::show_list))
+            .on_action(cx.listener(Self::show_icons))
             .on_action(cx.listener(Self::show_space_map))
             .on_action(cx.listener(Self::show_on_disk))
             .on_action(cx.listener(Self::toggle_details_action))

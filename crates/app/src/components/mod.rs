@@ -20,6 +20,7 @@ pub mod copy_ui;
 pub mod details;
 pub mod disk_strip;
 pub mod file_row;
+pub mod icon_tile;
 pub mod menu;
 pub mod search_field;
 pub mod sidebar;
