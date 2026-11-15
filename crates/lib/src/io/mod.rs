@@ -19,3 +19,4 @@ pub mod block;
 pub mod cache;
 pub mod device;
 pub mod file;
+pub mod space;

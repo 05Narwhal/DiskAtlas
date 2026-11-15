@@ -30,6 +30,7 @@ use crate::fs::{
 };
 use crate::io::block::{BlockSource, MemSource};
 use crate::io::file::FileSource;
+use crate::io::space::volume_space;
 
 /// The id of the top folder. `NodeId(0)` is never handed out.
 const ROOT: NodeId = NodeId(1);
@@ -281,12 +282,16 @@ fn timestamp(time: io::Result<std::time::SystemTime>) -> Option<Timestamp> {
 }
 
 impl FileSystem for NativeFs {
+    /// Total and free bytes are the host volume's that holds the root, asked
+    /// of the system on each call (one system call, nothing cached); both are
+    /// `None` when the system cannot tell.
     fn info(&self) -> VolumeInfo {
+        let space = volume_space(&self.inner.root_path);
         VolumeInfo {
             name: self.inner.name.clone(),
             format: None,
-            total_bytes: None,
-            free_bytes: None,
+            total_bytes: space.map(|(total, _)| total),
+            free_bytes: space.map(|(_, free)| free),
             resource_forks: false,
             journal: None,
             local_times: false,
@@ -1009,6 +1014,17 @@ mod tests {
         let info = fs.info();
         assert!(!info.resource_forks);
         assert_eq!(info.journal, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn info_reports_the_host_drive_space() {
+        let (_dir, fs) = fixture();
+        let info = fs.info();
+        let total = info.total_bytes.expect("total bytes");
+        let free = info.free_bytes.expect("free bytes");
+        assert!(total > 0);
+        assert!(free <= total);
     }
 
     #[test]
