@@ -32,6 +32,7 @@ use crate::error::{CorruptKind, Corruption, Error, Location, Result};
 use crate::io::block::BlockSource;
 
 pub mod apfs;
+pub mod fat;
 pub mod hfs;
 pub mod hfsplus;
 pub mod native;

@@ -105,6 +105,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fat_mount"
+path = "fuzz_targets/fat_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "hfs_mount"
 path = "fuzz_targets/hfs_mount.rs"
 test = false
