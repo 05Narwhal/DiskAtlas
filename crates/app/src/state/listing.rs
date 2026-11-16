@@ -1437,6 +1437,23 @@ impl Listing {
         }
     }
 
+    /// Selects the row called exactly `name` and moves the cursor there. False when there is
+    /// none (yet).
+    pub fn select_name(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        let found = (0..self.len())
+            .find(|&position| self.row(position).is_some_and(|row| row.entry.name == name));
+        let Some(position) = found else {
+            return false;
+        };
+        let Some(&id) = self.shown.order.get(position) else {
+            return false;
+        };
+        self.shown.selection.replace(id);
+        self.shown.cursor_position = Some(position);
+        self.user_moved(cx);
+        true
+    }
+
     /// Type-to-select: selects the first row in display order whose name starts with `prefix`
     /// (case-insensitive) and moves the cursor there. False when nothing matches.
     pub fn select_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) -> bool {
@@ -1853,6 +1870,17 @@ impl Listing {
         let mut path = self.host_folder_path(cx)?;
         path.push(row.entry.name);
         Some(path)
+    }
+
+    /// The files and devices Disk Atlas has open as disks or images: host operations must not
+    /// touch them.
+    pub fn open_disk_paths(&self, cx: &App) -> Vec<std::path::PathBuf> {
+        self.sources
+            .read(cx)
+            .disks()
+            .iter()
+            .map(|disk| disk.path.clone())
+            .collect()
     }
 
     /// The display positions of the selected rows, in order, at most `limit` of them.

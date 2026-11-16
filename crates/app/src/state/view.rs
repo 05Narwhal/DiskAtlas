@@ -13,7 +13,7 @@
 //
 // See the LICENSE file for the full license text.
 
-//! How the folder shown is presented: as a list, as the space map (`r1-redesign.md` 3.5), or as
+//! How the folder shown is presented: as a list, as icons, as the space map (`r1-redesign.md` 3.5), or as
 //! a disk view (3.4, the disk itself with the map of its volume).
 //!
 //! The space map and the disk view follow the navigation: they draw the folder the list would
@@ -33,6 +33,8 @@ pub enum ViewMode {
     /// The file list (Ctrl+1).
     #[default]
     List,
+    /// The folder as tiles (Ctrl+2).
+    Icons,
     /// The space map (Ctrl+3).
     SpaceMap,
 }

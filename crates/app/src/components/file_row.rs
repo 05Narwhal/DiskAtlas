@@ -219,11 +219,15 @@ pub struct FileRow {
     resource: Option<Option<SharedString>>,
     kind: &'static str,
     glyph: Glyph,
+    /// A picture's thumbnail, drawn in place of the glyph.
+    thumbnail: Option<std::sync::Arc<gpui::RenderImage>>,
     /// The entry is a package: drawn as one item unless `packages_as_folders` is on.
     package: Option<&'static str>,
     /// The Finder label, 0 to 7.
     label: u8,
     link: bool,
+    /// The name as it is being edited in place.
+    editing: Option<crate::state::rename::RenameEdit>,
     selected: bool,
     cursor: bool,
     /// True for a housekeeping item: drawn quieter.
@@ -270,10 +274,12 @@ impl FileRow {
             }),
             kind: format::kind(entry.name, entry.kind),
             glyph: Glyph::from_class(classify_entry(entry.name, browsable, None)),
+            thumbnail: None,
             package: bundle::is_package(entry.name, entry.kind, entry.flags)
                 .then(|| bundle::package_kind(entry.name)),
             label: entry.flags.label(),
             link: entry.kind == NodeKind::Symlink,
+            editing: None,
             selected: row.selected,
             cursor: row.cursor,
             system: false,
@@ -284,6 +290,18 @@ impl FileRow {
             on_context_menu: None,
             on_hover: None,
         }
+    }
+
+    /// Draws `image` in the icon tile in place of the glyph.
+    pub fn thumbnail(mut self, image: Option<std::sync::Arc<gpui::RenderImage>>) -> Self {
+        self.thumbnail = image;
+        self
+    }
+
+    /// Draws the name as an edit field.
+    pub fn editing(mut self, edit: Option<crate::state::rename::RenameEdit>) -> Self {
+        self.editing = edit;
+        self
     }
 
     /// Draws `amount` of the hover fill (`None`: the row is not under the pointer).
@@ -411,6 +429,12 @@ impl RenderOnce for FileRow {
         if self.link {
             name = name.italic();
         }
+        if let Some(edit) = &self.editing {
+            name = div()
+                .flex_1()
+                .min_w_0()
+                .child(crate::components::rename_text::rename_text(edit, &colors));
+        }
 
         let inner = inner
             .child(
@@ -424,14 +448,22 @@ impl RenderOnce for FileRow {
                             .items_center()
                             .justify_center()
                             .rounded(radius::MARK)
-                            .when(!self.selected, |tile| tile.bg(colors.wash(self.glyph)))
-                            .child(
-                                svg()
+                            .when(!self.selected && self.thumbnail.is_none(), |tile| {
+                                tile.bg(colors.wash(self.glyph))
+                            })
+                            .child(match self.thumbnail {
+                                Some(image) => gpui::img(gpui::ImageSource::Render(image))
+                                    .max_w(icon_size)
+                                    .max_h(icon_size)
+                                    .object_fit(gpui::ObjectFit::Contain)
+                                    .into_any_element(),
+                                None => svg()
                                     .path(self.glyph.path())
                                     .flex_none()
                                     .size(glyph_size)
-                                    .text_color(icon_color),
-                            ),
+                                    .text_color(icon_color)
+                                    .into_any_element(),
+                            }),
                     )
                     .children(label_dot)
                     .child(name),

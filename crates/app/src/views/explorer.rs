@@ -24,7 +24,8 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use disk_atlas_lib::fs::NodeId;
+use disk_atlas_lib::fs::{NodeId, NodeKind};
+use disk_atlas_lib::mac::bundle;
 use disk_atlas_lib::search::match_ranges;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
@@ -38,19 +39,26 @@ use crate::components::file_row::{
     FileRow, FolderCache, columns, folder_cell, kind_cell, modified_cell, name_cell, resource_cell,
     row_frame, size_cell,
 };
+use crate::components::icon_tile::IconTile;
 use crate::components::menu::MenuSlot;
 use crate::components::toolbar::FilterRow;
 use crate::elevation::{self, Restart};
 use crate::keymap::{
-    BUTTON, FILE_LIST, context, controls, file_list, menu as menu_keys, quick_look,
+    BUTTON, FILE_LIST, RENAMING, context, controls, file_list, host_ops, menu as menu_keys,
+    quick_look,
 };
+use crate::ops::{self, Conflict, HostPath, Step, UndoStack};
+use crate::state::icon_grid;
 use crate::state::listing::{Click, Listing, ListingEvent, LoadState, Motion};
 use crate::state::menus::{
     BUILT, MAX_ROW_FACTS, MenuState, MenuTarget, RowFacts, build, file_manager_name,
 };
 use crate::state::order::{SortColumn, SortSpec};
+use crate::state::rename::RenameEdit;
 use crate::state::search::{Search, SearchEvent};
 use crate::state::sources::{Availability, SourceId};
+use crate::state::thumbnails::{self, Key, Origin, Thumbnails, Want};
+use crate::state::view::{ViewEvent, ViewMode, ViewState};
 use crate::theme::{
     Colors, Theme, metrics,
     motion::{self, Entrance, Tween},
@@ -279,6 +287,88 @@ fn is_disk_image(name: &str, folder: bool) -> bool {
 /// The text a "Copy as" puts on the clipboard for the row at `position`. On the host a path is
 /// the real one; elsewhere it starts with the volume's name, `/` between names (`:` for the Mac
 /// form), as the breadcrumb and the Folder column of results show it.
+/// Copies or moves `items` into `dir`, one by one; the first failure stops the rest.
+fn paste_job(items: &[HostPath], dir: &HostPath, cut: bool, conflict: Conflict) -> OpOutcome {
+    let mut outcome = OpOutcome {
+        spent_clipboard: cut,
+        ..OpOutcome::default()
+    };
+    let mut created = Vec::new();
+    for item in items {
+        let done = if cut {
+            ops::move_into(item, dir, conflict)
+        } else {
+            ops::copy_into(item, dir, conflict)
+        };
+        match done {
+            Ok(Some(to)) => {
+                if cut {
+                    outcome.steps.push(Step::Moved {
+                        from: item.path().to_path_buf(),
+                        to: to.clone(),
+                    });
+                }
+                created.push(to);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                outcome.error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    if !cut && !created.is_empty() {
+        outcome.steps.push(Step::Copied {
+            created: created.clone(),
+        });
+    }
+    outcome.select = created
+        .first()
+        .and_then(|path| path.file_name())
+        .map(|name| (name.to_string_lossy().into_owned(), false));
+    outcome
+}
+
+/// The thumbnail of `row` when it is a picture and the listing is a plain folder; a miss is
+/// added to `wants` for the pipeline.
+fn thumbnail_of(
+    listing: &Listing,
+    thumbnails: &Thumbnails,
+    row: &crate::state::listing::Row<'_>,
+    edge: u32,
+    wants: &mut Vec<Want>,
+) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let entry = &row.entry;
+    if listing.in_results() {
+        return None;
+    }
+    let origin = if thumbnails::eligible(entry.name, entry.kind, entry.size) {
+        Origin::Picture
+    } else if entry.kind == NodeKind::Directory {
+        if bundle::is_package(entry.name, entry.kind, entry.flags) {
+            Origin::PackageIcon
+        } else {
+            Origin::FolderIcon
+        }
+    } else {
+        return None;
+    };
+    let location = listing.location()?;
+    let key = Key {
+        source: location.source(),
+        node: entry.node,
+        edge,
+        modified: entry.modified.map(|time| time.unix_nanos()),
+    };
+    wants.push(Want {
+        key,
+        fs: std::sync::Arc::clone(location.fs()),
+        name: SharedString::from(entry.name.to_owned()),
+        origin,
+    });
+    thumbnails.image(&key)
+}
+
 fn row_text(listing: &Listing, position: usize, kind: CopyKind, cx: &App) -> Option<String> {
     let row = listing.row(position)?;
     let (separator, mac) = match kind {
@@ -310,8 +400,57 @@ fn row_text(listing: &Listing, position: usize, kind: CopyKind, cx: &App) -> Opt
 }
 
 /// The file list view.
+/// Most items one operation takes.
+const MAX_OP_ITEMS: usize = 10_000;
+
+/// A name being edited in place.
+struct Renaming {
+    path: HostPath,
+    position: usize,
+    edit: RenameEdit,
+}
+
+/// Items remembered by Copy or Cut, for Paste.
+struct OpsClipboard {
+    items: Vec<HostPath>,
+    cut: bool,
+}
+
+/// What a finished operation tells the explorer.
+#[derive(Default)]
+struct OpOutcome {
+    /// Steps to remember for undo, oldest first.
+    steps: Vec<Step>,
+    /// A sentence for the user when something failed.
+    error: Option<String>,
+    /// A name to select once the folder is read again, and whether to start renaming it.
+    select: Option<(String, bool)>,
+    /// Paste: the items were moved, so the remembered ones are used up.
+    spent_clipboard: bool,
+}
+
 pub struct Explorer {
     listing: Entity<Listing>,
+    /// Whether the folder is drawn as a list or as tiles.
+    view: Entity<ViewState>,
+    /// The name being edited in place.
+    renaming: Option<Renaming>,
+    /// What Ctrl+Z takes back.
+    undo: UndoStack,
+    /// True while a confirmation prompt waits for an answer; Ctrl+Z does nothing then.
+    prompt_open: bool,
+    /// What Ctrl+C or Ctrl+X remembered.
+    ops_clipboard: Option<OpsClipboard>,
+    /// The last operation's failure, shown under the list until the next action.
+    ops_notice: Option<SharedString>,
+    /// A name to select (and start renaming) when the folder has been read again.
+    pending_select: Option<(String, bool)>,
+    /// Pictures' thumbnails, for tiles and list rows.
+    thumbnails: Entity<Thumbnails>,
+    /// Width of the area the tiles fill, as the last frame measured it.
+    grid_width: Rc<Cell<Pixels>>,
+    /// Tiles across in the icon view, from `grid_width`.
+    grid_columns: usize,
     search: Entity<Search>,
     /// The filter controls above the column header, shown while a search is active.
     filter_row: Entity<FilterRow>,
@@ -361,6 +500,8 @@ impl Explorer {
     /// `search` is active.
     pub fn new(
         listing: Entity<Listing>,
+        view: Entity<ViewState>,
+        thumbnails: Entity<Thumbnails>,
         search: Entity<Search>,
         filter_row: Entity<FilterRow>,
         window: &mut Window,
@@ -368,11 +509,19 @@ impl Explorer {
     ) -> Self {
         let subscriptions = vec![
             cx.subscribe(&search, |_, _, _: &SearchEvent, cx| cx.notify()),
+            cx.observe(&thumbnails, |_, _, cx| cx.notify()),
+            cx.subscribe(&view, |this, _, _: &ViewEvent, cx| {
+                // The other layout has other row heights: start at the top.
+                this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            }),
             cx.observe_in(&listing, window, |this, listing, window, cx| {
                 // A menu belongs to the folder it was opened in.
                 if this.follow_folder(&listing, cx) {
                     this.menu.dismiss(window, cx);
+                    this.renaming = None;
                 }
+                this.apply_pending_select(&listing, window, cx);
                 cx.notify();
             }),
             cx.subscribe(
@@ -386,6 +535,16 @@ impl Explorer {
         ];
         Self {
             listing,
+            view,
+            renaming: None,
+            undo: UndoStack::default(),
+            prompt_open: false,
+            ops_clipboard: None,
+            ops_notice: None,
+            pending_select: None,
+            thumbnails,
+            grid_width: Rc::new(Cell::new(Pixels::ZERO)),
+            grid_columns: icon_grid::UNMEASURED_COLUMNS,
             search,
             filter_row,
             ranges: Vec::new(),
@@ -435,16 +594,49 @@ impl Explorer {
         false
     }
 
+    /// True while the folder is drawn as tiles.
+    fn icons(&self, cx: &App) -> bool {
+        self.view.read(cx).mode() == ViewMode::Icons
+    }
+
+    /// Side of a tile: the roomy density draws larger ones.
+    fn tile_side() -> f32 {
+        match Density::default() {
+            Density::Roomy => icon_grid::TILE_ROOMY,
+            Density::Compact | Density::Regular => icon_grid::TILE_REGULAR,
+        }
+    }
+
+    /// Height of one scrolled item: a list row, or a row of tiles.
+    fn item_height(&self, cx: &App) -> Pixels {
+        if self.icons(cx) {
+            px(icon_grid::row_height(Self::tile_side()))
+        } else {
+            Density::default().row_height()
+        }
+    }
+
+    /// The scrolled item that holds list `position`.
+    fn item_of(&self, position: usize, cx: &App) -> usize {
+        if self.icons(cx) {
+            icon_grid::row_of(position, self.grid_columns)
+        } else {
+            position
+        }
+    }
+
     /// Scrolls the cursor row into view with the smallest movement: nothing if it is fully
     /// visible, otherwise to the nearer edge.
     fn reveal_cursor(&mut self, cx: &mut Context<Self>) {
         let Some(position) = self.listing.read(cx).cursor() else {
             return;
         };
+        let item = self.item_of(position, cx);
+        let item_height = self.item_height(cx);
         let above = {
             let state = self.scroll.0.borrow();
             let top = -state.base_handle.offset().y;
-            Density::default().row_height() * position < top
+            item_height * item < top
         };
         // A non-strict scroll does nothing for a fully visible row; for one out of view, the
         // strategy names the edge it lands on.
@@ -453,21 +645,26 @@ impl Explorer {
         } else {
             ScrollStrategy::Bottom
         };
-        self.scroll.scroll_to_item(position, strategy);
+        self.scroll.scroll_to_item(item, strategy);
         cx.notify();
     }
 
-    /// Whole rows visible in the list, at least one.
-    fn page_rows(&self) -> usize {
+    /// Whole positions visible in the list, at least one: in the icon view, whole rows of tiles.
+    fn page_rows(&self, cx: &App) -> usize {
         let height = self
             .scroll
             .0
             .borrow()
             .last_item_size
             .map(|size| size.item.height);
-        height.map_or(1, |height| {
-            (height / Density::default().row_height()).floor().max(1.0) as usize
-        })
+        let rows = height.map_or(1, |height| {
+            (height / self.item_height(cx)).floor().max(1.0) as usize
+        });
+        if self.icons(cx) {
+            rows * self.grid_columns
+        } else {
+            rows
+        }
     }
 
     fn move_cursor(&mut self, motion: Motion, extend: bool, cx: &mut Context<Self>) {
@@ -475,7 +672,7 @@ impl Explorer {
         self.listing
             .update(cx, |listing, cx| listing.move_cursor(motion, extend, cx));
         let to = self.listing.read(cx).cursor();
-        let one_step = !extend && matches!(motion, Motion::Up | Motion::Down);
+        let one_step = !extend && matches!(motion, Motion::Up | Motion::Down) && !self.icons(cx);
         let now = Instant::now();
         self.glide = None;
         if one_step
@@ -506,20 +703,57 @@ impl Explorer {
         self.last_step = one_step.then_some(now);
     }
 
+    /// One step up (`forward == false`) or down: a row of the list, or a whole row of tiles.
+    fn step_vertical(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        let motion = if !self.icons(cx) {
+            if forward { Motion::Down } else { Motion::Up }
+        } else if forward {
+            Motion::PageDown(self.grid_columns)
+        } else {
+            Motion::PageUp(self.grid_columns)
+        };
+        self.move_cursor(motion, extend, cx);
+    }
+
+    /// One tile left or right. Does nothing in the list, where the keys are not bound.
+    fn step_across(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        if !self.icons(cx) {
+            cx.propagate();
+            return;
+        }
+        self.move_cursor(if forward { Motion::Down } else { Motion::Up }, extend, cx);
+    }
+
     fn move_up(&mut self, _: &file_list::MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Up, false, cx);
+        self.step_vertical(false, false, cx);
     }
 
     fn move_down(&mut self, _: &file_list::MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Down, false, cx);
+        self.step_vertical(true, false, cx);
+    }
+
+    fn move_left(&mut self, _: &file_list::MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(false, false, cx);
+    }
+
+    fn move_right(&mut self, _: &file_list::MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(true, false, cx);
+    }
+
+    fn select_left(&mut self, _: &file_list::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(false, true, cx);
+    }
+
+    fn select_right(&mut self, _: &file_list::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_across(true, true, cx);
     }
 
     fn page_up(&mut self, _: &file_list::PageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::PageUp(self.page_rows()), false, cx);
+        self.move_cursor(Motion::PageUp(self.page_rows(cx)), false, cx);
     }
 
     fn page_down(&mut self, _: &file_list::PageDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::PageDown(self.page_rows()), false, cx);
+        self.move_cursor(Motion::PageDown(self.page_rows(cx)), false, cx);
     }
 
     fn move_to_first(
@@ -536,11 +770,11 @@ impl Explorer {
     }
 
     fn select_up(&mut self, _: &file_list::SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Up, true, cx);
+        self.step_vertical(false, true, cx);
     }
 
     fn select_down(&mut self, _: &file_list::SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(Motion::Down, true, cx);
+        self.step_vertical(true, true, cx);
     }
 
     fn select_page_up(
@@ -549,7 +783,7 @@ impl Explorer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_cursor(Motion::PageUp(self.page_rows()), true, cx);
+        self.move_cursor(Motion::PageUp(self.page_rows(cx)), true, cx);
     }
 
     fn select_page_down(
@@ -558,7 +792,7 @@ impl Explorer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_cursor(Motion::PageDown(self.page_rows()), true, cx);
+        self.move_cursor(Motion::PageDown(self.page_rows(cx)), true, cx);
     }
 
     fn select_to_first(
@@ -583,12 +817,12 @@ impl Explorer {
     fn open(&mut self, _: &file_list::Open, _: &mut Window, cx: &mut Context<Self>) {
         let on_file = {
             let listing = self.listing.read(cx);
-            listing
-                .cursor()
-                .is_some_and(|position| {
-                    listing.row(position).is_some_and(|row| !row.entry.is_browsable())
-                        || listing.is_package_row(position, cx)
-                })
+            listing.cursor().is_some_and(|position| {
+                listing
+                    .row(position)
+                    .is_some_and(|row| !row.entry.is_browsable())
+                    || listing.is_package_row(position, cx)
+            })
         };
         if on_file {
             cx.propagate();
@@ -613,7 +847,12 @@ impl Explorer {
     }
 
     /// "Show original": goes to what the link or alias under the cursor points at.
-    fn show_original(&mut self, _: &file_list::ShowOriginal, _: &mut Window, cx: &mut Context<Self>) {
+    fn show_original(
+        &mut self,
+        _: &file_list::ShowOriginal,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.listing
             .update(cx, |listing, cx| listing.show_original_cursor(cx));
     }
@@ -660,6 +899,15 @@ impl Explorer {
     fn key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
+        if self.renaming.is_some() {
+            if !(modifiers.control || modifiers.alt || modifiers.platform)
+                && let Some(text) = keystroke.key_char.as_deref()
+            {
+                self.edit(cx, |edit| edit.insert(text));
+            }
+            cx.stop_propagation();
+            return;
+        }
         // Shift is how capitals are typed; the rest make the key a shortcut, not text.
         if modifiers.control || modifiers.alt || modifiers.platform {
             return;
@@ -811,7 +1059,7 @@ impl Explorer {
             (listing.cursor(), listing.selected_count())
         };
         let Some(position) = cursor else {
-            let at = self.row_anchor(0);
+            let at = self.row_anchor(0, self.icons(cx));
             self.right_press_empty(at, window, cx);
             return;
         };
@@ -820,7 +1068,7 @@ impl Explorer {
                 listing.click(position, Click::Replace, cx)
             });
         }
-        let at = self.row_anchor(position);
+        let at = self.row_anchor(position, self.icons(cx));
         if let Some(target) = self.rows_target(cx) {
             self.show_menu(&target, at, window, cx);
         }
@@ -828,10 +1076,20 @@ impl Explorer {
 
     /// Where a menu opened from the keyboard goes: inside the name column, under the row's
     /// middle, so the menu does not cover the row.
-    fn row_anchor(&self, position: usize) -> Point<Pixels> {
+    fn row_anchor(&self, position: usize, icons: bool) -> Point<Pixels> {
         let state = self.scroll.0.borrow();
         let bounds = state.base_handle.bounds();
         let offset = state.base_handle.offset();
+        if icons {
+            let side = Self::tile_side();
+            let columns = self.grid_columns.max(1);
+            let (row, column) = (position / columns, position % columns);
+            return point(
+                bounds.left()
+                    + px(icon_grid::INSET + (side + icon_grid::GAP) * column as f32 + side / 2.0),
+                bounds.top() + offset.y + px(icon_grid::row_height(side)) * row as f32 + px(side),
+            );
+        }
         let row = Density::default().row_height();
         point(
             bounds.left() + space::S48,
@@ -951,6 +1209,9 @@ impl Explorer {
             self.folder_cache.clear();
         }
         let folder_width = self.folder_width.get();
+        let thumbs = self.thumbnails.read(cx);
+        let mut wants = Vec::new();
+        let edge = thumbnails::edge_for(f32::from(Density::default().icon_size()));
         let rows = range
             .map(|position| match listing.row(position) {
                 Some(row) => {
@@ -958,10 +1219,13 @@ impl Explorer {
                         .hover_paint
                         .and_then(|(at, amount)| (at == position).then_some(amount));
                     let under_plate = self.glide_paint.is_some_and(|(to, _)| to == position);
-                    let mut file_row = FileRow::new(&row, position, resource_column, listing.local_times())
-                        .system(listing.system_of(&row))
-                        .hover(hover)
-                        .under_plate(under_plate);
+                    let mut file_row =
+                        FileRow::new(&row, position, resource_column, listing.local_times())
+                            .system(listing.system_of(&row))
+                            .thumbnail(thumbnail_of(listing, thumbs, &row, edge, &mut wants))
+                            .hover(hover)
+                            .under_plate(under_plate)
+                            .editing(self.edit_of(position));
                     if in_results {
                         match_ranges(row.entry.name, listing.terms(), &mut self.ranges);
                         let folder = listing.folder_of(position).unwrap_or_default();
@@ -986,6 +1250,8 @@ impl Explorer {
                 None => row_frame().into_any_element(),
             })
             .collect();
+        let thumbnails = self.thumbnails.clone();
+        cx.defer(move |cx| thumbnails.update(cx, |t, cx| t.want(wants, cx)));
         if in_results {
             // Sorting the rest of a large result set starts work; keep that out of the paint.
             let listing = self.listing.clone();
@@ -999,6 +1265,413 @@ impl Explorer {
         let visible = range_for_visible;
         cx.defer(move |cx| {
             listing.update(cx, |listing, cx| listing.note_visible(visible, cx));
+        });
+        rows
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Host file operations (R8)
+    // ---------------------------------------------------------------------------------------
+
+    /// The selected rows as host paths; empty in a folder that is not the host's.
+    fn selected_host_paths(&self, cx: &App) -> Vec<HostPath> {
+        let listing = self.listing.read(cx);
+        listing
+            .selected_positions(MAX_OP_ITEMS)
+            .into_iter()
+            .filter_map(|position| HostPath::of(listing, position, cx))
+            .collect()
+    }
+
+    /// Refuses (with a notice) when an item is, or holds, a disk or image that is open.
+    fn guard_open(&mut self, items: &[HostPath], cx: &mut Context<Self>) -> bool {
+        let open = self.listing.read(cx).open_disk_paths(cx);
+        match ops::open_conflict(items, &open) {
+            Some(item) => {
+                let name = item
+                    .path()
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                self.ops_notice = Some(
+                    format!("\u{201c}{name}\u{201d} is open in Disk Atlas. Close it first.").into(),
+                );
+                cx.notify();
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// Runs `job` on the background executor and applies its outcome here.
+    fn run_op(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        job: impl FnOnce() -> OpOutcome + Send + 'static,
+    ) {
+        self.ops_notice = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = cx.background_executor().spawn(async move { job() }).await;
+            this.update_in(cx, |this, _, cx| this.finish_op(outcome, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn finish_op(&mut self, outcome: OpOutcome, cx: &mut Context<Self>) {
+        for step in outcome.steps {
+            self.undo.push(step);
+        }
+        if outcome.spent_clipboard {
+            self.ops_clipboard = None;
+        }
+        self.ops_notice = outcome.error.map(SharedString::from);
+        self.pending_select = outcome.select;
+        self.listing.update(cx, |listing, cx| listing.refresh(cx));
+        cx.notify();
+    }
+
+    /// After a re-read: selects the name an operation asked for, and starts renaming it when
+    /// that was asked.
+    fn apply_pending_select(
+        &mut self,
+        listing: &Entity<Listing>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, rename)) = self.pending_select.clone() else {
+            return;
+        };
+        if !matches!(listing.read(cx).state(), LoadState::Ready) {
+            return;
+        }
+        self.pending_select = None;
+        let selected = listing.update(cx, |listing, cx| listing.select_name(&name, cx));
+        if selected && rename {
+            self.start_rename(window, cx);
+        }
+    }
+
+    /// F2: edits the name of the row under the cursor in place.
+    fn rename(&mut self, _: &host_ops::Rename, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_rename(window, cx);
+    }
+
+    fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (position, path, name) = {
+            let listing = self.listing.read(cx);
+            let Some(position) = listing.cursor() else {
+                return;
+            };
+            let (Some(path), Some(row)) =
+                (HostPath::of(listing, position, cx), listing.row(position))
+            else {
+                return;
+            };
+            (position, path, row.entry.name.to_owned())
+        };
+        if !self.guard_open(std::slice::from_ref(&path), cx) {
+            return;
+        }
+        self.ops_notice = None;
+        self.renaming = Some(Renaming {
+            path,
+            position,
+            edit: RenameEdit::new(&name),
+        });
+        window.focus(&self.focus);
+        self.reveal_cursor(cx);
+        cx.notify();
+    }
+
+    /// The name editor when `position` is the row being renamed.
+    fn edit_of(&self, position: usize) -> Option<RenameEdit> {
+        self.renaming
+            .as_ref()
+            .filter(|renaming| renaming.position == position)
+            .map(|renaming| renaming.edit.clone())
+    }
+
+    fn edit(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut RenameEdit)) {
+        if let Some(renaming) = &mut self.renaming {
+            change(&mut renaming.edit);
+            cx.notify();
+        }
+    }
+
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else {
+            return;
+        };
+        cx.notify();
+        let name = renaming.edit.text().to_owned();
+        let unchanged = renaming
+            .path
+            .path()
+            .file_name()
+            .is_some_and(|old| old.to_string_lossy() == name);
+        if unchanged {
+            return;
+        }
+        self.run_op(window, cx, move || {
+            match ops::rename(&renaming.path, &name) {
+                Ok(to) => OpOutcome {
+                    steps: vec![Step::Moved {
+                        from: renaming.path.path().to_path_buf(),
+                        to,
+                    }],
+                    select: Some((name, false)),
+                    ..OpOutcome::default()
+                },
+                Err(error) => OpOutcome {
+                    error: Some(error.to_string()),
+                    ..OpOutcome::default()
+                },
+            }
+        });
+    }
+
+    /// Ctrl+Shift+N: a new folder in the folder shown, named in place.
+    fn new_folder(&mut self, _: &host_ops::NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        if self.listing.read(cx).in_results() {
+            return;
+        }
+        let Some(parent) = HostPath::folder_of(self.listing.read(cx), cx) else {
+            return;
+        };
+        self.run_op(window, cx, move || match ops::new_folder(&parent) {
+            Ok(path) => OpOutcome {
+                select: path
+                    .file_name()
+                    .map(|name| (name.to_string_lossy().into_owned(), true)),
+                steps: vec![Step::NewFolder { path }],
+                ..OpOutcome::default()
+            },
+            Err(error) => OpOutcome {
+                error: Some(format!("Could not make a new folder: {error}")),
+                ..OpOutcome::default()
+            },
+        });
+    }
+
+    /// Delete: asks, then moves the selected items to the Recycle Bin.
+    fn move_to_trash(
+        &mut self,
+        _: &host_ops::MoveToTrash,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let items = self.selected_host_paths(cx);
+        if items.is_empty() || !self.guard_open(&items, cx) {
+            return;
+        }
+        let bin = if cfg!(target_os = "windows") {
+            "Recycle Bin"
+        } else {
+            "Trash"
+        };
+        let question = match items.as_slice() {
+            [one] => format!(
+                "Move \u{201c}{}\u{201d} to the {bin}?",
+                one.path()
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+            ),
+            many => format!("Move {} items to the {bin}?", many.len()),
+        };
+        let move_label = format!("Move to the {bin}");
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &question,
+            Some("You can put them back with Ctrl+Z, or from the bin."),
+            &[move_label.as_str(), "Cancel"],
+            cx,
+        );
+        self.prompt_open = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await;
+            this.update(cx, |this, _| this.prompt_open = false).ok();
+            if answer != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.run_op(window, cx, move || match ops::trash(&items) {
+                    Ok(()) => OpOutcome {
+                        steps: vec![Step::Trashed {
+                            originals: items.iter().map(|item| item.path().to_path_buf()).collect(),
+                        }],
+                        ..OpOutcome::default()
+                    },
+                    Err(error) => OpOutcome {
+                        error: Some(format!("Could not move to the bin: {error}")),
+                        ..OpOutcome::default()
+                    },
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ctrl+Z: takes back the last operation.
+    fn undo(&mut self, _: &host_ops::Undo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prompt_open {
+            return;
+        }
+        let Some(step) = self.undo.pop() else {
+            return;
+        };
+        self.run_op(window, cx, move || match step.undo() {
+            Ok(()) => OpOutcome::default(),
+            Err(error) => OpOutcome {
+                error: Some(error),
+                ..OpOutcome::default()
+            },
+        });
+    }
+
+    /// Ctrl+C and Ctrl+X: remember the selected items for Paste. Copy also puts their paths on
+    /// the system clipboard as text.
+    fn remember_items(&mut self, cut: bool, cx: &mut Context<Self>) {
+        let items = self.selected_host_paths(cx);
+        if items.is_empty() {
+            return;
+        }
+        if !cut {
+            let text = items
+                .iter()
+                .map(|item| item.path().display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        self.ops_clipboard = Some(OpsClipboard { items, cut });
+        self.ops_notice = None;
+        cx.notify();
+    }
+
+    /// Ctrl+V: copies or moves the remembered items into the folder shown. Names that are taken
+    /// are asked about once for the whole batch.
+    fn paste_items(
+        &mut self,
+        _: &host_ops::PasteItems,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = HostPath::folder_of(self.listing.read(cx), cx) else {
+            return;
+        };
+        let Some(clipboard) = self.ops_clipboard.as_ref() else {
+            return;
+        };
+        let (items, cut) = (clipboard.items.clone(), clipboard.cut);
+        if self.listing.read(cx).in_results() || !self.guard_open(&items, cx) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let (counted_items, counted_dir) = (items.clone(), dir.clone());
+            let taken = cx
+                .background_executor()
+                .spawn(async move { ops::count_conflicts(&counted_items, &counted_dir) })
+                .await;
+            let conflict = if taken == 0 {
+                Conflict::KeepBoth
+            } else {
+                let question = if taken == 1 {
+                    "An item with that name is already here.".to_owned()
+                } else {
+                    format!("{taken} items with those names are already here.")
+                };
+                let answer = this
+                    .update_in(cx, |this, window, cx| {
+                        this.prompt_open = true;
+                        window.prompt(
+                            gpui::PromptLevel::Warning,
+                            &question,
+                            None,
+                            &["Replace", "Keep both", "Skip", "Cancel"],
+                            cx,
+                        )
+                    })
+                    .ok();
+                let Some(answer) = answer else {
+                    return;
+                };
+                let result = answer.await;
+                this.update(cx, |this, _| this.prompt_open = false).ok();
+                match result {
+                    Ok(0) => Conflict::Replace,
+                    Ok(1) => Conflict::KeepBoth,
+                    Ok(2) => Conflict::Skip,
+                    _ => return,
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.run_op(window, cx, move || paste_job(&items, &dir, cut, conflict));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The rows of tiles in the visible `range`: one element per grid row.
+    fn render_tiles(
+        &mut self,
+        range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let columns = self.grid_columns;
+        let side = Self::tile_side();
+        let listing = self.listing.read(cx);
+        let thumbs = self.thumbnails.read(cx);
+        let mut wants = Vec::new();
+        let edge = thumbnails::edge_for(side - 16.0);
+        let len = listing.len();
+        let rows = range
+            .clone()
+            .map(|grid_row| {
+                let tiles = icon_grid::positions(grid_row, columns, len)
+                    .filter_map(|position| {
+                        let row = listing.row(position)?;
+                        Some(
+                            IconTile::new(&row, position, px(side))
+                                .thumbnail(thumbnail_of(listing, thumbs, &row, edge, &mut wants))
+                                .system(listing.system_of(&row))
+                                .editing(self.edit_of(position))
+                                .on_mouse_down(cx.listener(
+                                    move |this, event: &MouseDownEvent, _, cx| {
+                                        this.press_row(position, event, cx);
+                                    },
+                                ))
+                                .on_context_menu(cx.listener(
+                                    move |this, event: &MouseDownEvent, window, cx| {
+                                        this.right_press_row(position, event, window, cx);
+                                    },
+                                ))
+                                .into_any_element(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                div()
+                    .w_full()
+                    .h(px(icon_grid::row_height(side)))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .gap(px(icon_grid::GAP))
+                    .px(px(icon_grid::INSET))
+                    .children(tiles)
+                    .into_any_element()
+            })
+            .collect();
+        let thumbnails = self.thumbnails.clone();
+        cx.defer(move |cx| thumbnails.update(cx, |t, cx| t.want(wants, cx)));
+        let first = icon_grid::positions(range.start, columns, len).start;
+        let last = icon_grid::positions(range.end.saturating_sub(1), columns, len).end;
+        let listing = self.listing.clone();
+        cx.defer(move |cx| {
+            listing.update(cx, |listing, cx| listing.note_visible(first..last, cx));
         });
         rows
     }
@@ -1437,24 +2110,35 @@ impl Render for Explorer {
                 | LoadState::Unavailable(_) => None,
             }
         };
-        let note = listing.note().cloned();
+        let note = self.ops_notice.clone().or_else(|| listing.note().cloned());
 
-        let list = uniform_list("file-list", count, cx.processor(Self::render_rows))
-            .track_scroll(self.scroll.clone())
-            .size_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.listing
-                        .update(cx, |listing, cx| listing.clear_selection(cx));
-                }),
+        let icons = self.icons(cx);
+        let list = if icons {
+            let width = f32::from(self.grid_width.get());
+            self.grid_columns = icon_grid::columns_for(width, Self::tile_side());
+            uniform_list(
+                "icon-grid",
+                icon_grid::row_count(count, self.grid_columns),
+                cx.processor(Self::render_tiles),
             )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.right_press_empty(event.position, window, cx);
-                }),
-            );
+        } else {
+            uniform_list("file-list", count, cx.processor(Self::render_rows))
+        }
+        .track_scroll(self.scroll.clone())
+        .size_full()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.listing
+                    .update(cx, |listing, cx| listing.clear_selection(cx));
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.right_press_empty(event.position, window, cx);
+            }),
+        );
 
         let list_area = div()
             .relative()
@@ -1465,6 +2149,22 @@ impl Render for Explorer {
             })
             .children(plate)
             .child(list)
+            .when(icons, |area| {
+                // Measures the width the tiles flow in; a change draws the next frame again.
+                let width = self.grid_width.clone();
+                area.child(
+                    canvas(
+                        move |bounds, window, _| {
+                            if width.replace(bounds.size.width) != bounds.size.width {
+                                window.refresh();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .children(message.map(|(title, detail)| {
                 let area = div()
                     .absolute()
@@ -1490,13 +2190,21 @@ impl Render for Explorer {
             }));
 
         let list_view = div()
-            .key_context(FILE_LIST)
+            .key_context(if self.renaming.is_some() {
+                RENAMING
+            } else {
+                FILE_LIST
+            })
             .track_focus(&self.focus)
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, _| {
                 window.focus(&this.focus);
             }))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::move_left))
+            .on_action(cx.listener(Self::move_right))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::page_up))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::move_to_first))
@@ -1508,6 +2216,51 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::select_to_first))
             .on_action(cx.listener(Self::select_to_last))
             .on_action(cx.listener(Self::open))
+            .on_action(cx.listener(Self::rename))
+            .on_action(cx.listener(Self::new_folder))
+            .on_action(cx.listener(Self::move_to_trash))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::paste_items))
+            .on_action(cx.listener(|this, _: &host_ops::CopyItems, _, cx| {
+                this.remember_items(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::CutItems, _, cx| {
+                this.remember_items(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditLeft, _, cx| {
+                this.edit(cx, |e| e.left(false));
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditRight, _, cx| {
+                this.edit(cx, |e| e.right(false));
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditSelectLeft, _, cx| {
+                this.edit(cx, |e| e.left(true));
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditSelectRight, _, cx| {
+                this.edit(cx, |e| e.right(true));
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditHome, _, cx| {
+                this.edit(cx, |e| e.home(false));
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditEnd, _, cx| {
+                this.edit(cx, |e| e.end(false));
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditBackspace, _, cx| {
+                this.edit(cx, |e| e.backspace());
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditDelete, _, cx| {
+                this.edit(cx, |e| e.delete());
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditSelectAll, _, cx| {
+                this.edit(cx, |e| e.select_all());
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditCommit, window, cx| {
+                this.commit_rename(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &host_ops::EditCancel, _, cx| {
+                this.renaming = None;
+                cx.notify();
+            }))
             .on_action(cx.listener(Self::show_in_folder))
             .on_action(cx.listener(Self::show_package_contents))
             .on_action(cx.listener(Self::show_original))
@@ -1566,7 +2319,7 @@ impl Render for Explorer {
             .flex_col()
             .overflow_hidden()
             // A source that cannot be browsed has no columns to show.
-            .when(unavailable.is_none(), |view| {
+            .when(unavailable.is_none() && !icons, |view| {
                 view.child(self.render_header(sort, resource_column, in_results, &colors, cx))
             })
             .child(list_area)

@@ -70,6 +70,8 @@ pub const COPY_DETAILS: &str = "CopyDetails";
 
 /// Key context of the search field (`components/search_field.rs`).
 pub const SEARCH_FIELD: &str = "SearchField";
+/// The file list while a name is being edited in place.
+pub const RENAMING: &str = "Renaming";
 
 /// Key context of an open menu (`components/menu.rs`).
 pub const MENU: &str = "Menu";
@@ -232,6 +234,14 @@ pub mod file_list {
             SelectToFirst,
             /// Extend the selection to the last row.
             SelectToLast,
+            /// Icon view: cursor one tile left.
+            MoveLeft,
+            /// Icon view: cursor one tile right.
+            MoveRight,
+            /// Icon view: extend the selection one tile left.
+            SelectLeft,
+            /// Icon view: extend the selection one tile right.
+            SelectRight,
             /// Open the folder under the cursor.
             Open,
             /// Select every row.
@@ -248,6 +258,52 @@ pub mod file_list {
     );
 }
 
+/// Actions on the host's own files (R8), in the file list, and the keys of the in-place name
+/// editor.
+pub mod host_ops {
+    gpui::actions!(
+        host_ops,
+        [
+            /// Rename the item under the cursor in place (F2).
+            Rename,
+            /// Make a new folder and start naming it (Ctrl+Shift+N).
+            NewFolder,
+            /// Move the selected items to the Recycle Bin (Delete).
+            MoveToTrash,
+            /// Take back the last operation (Ctrl+Z).
+            Undo,
+            /// Remember the selected items to copy (Ctrl+C).
+            CopyItems,
+            /// Remember the selected items to move (Ctrl+X).
+            CutItems,
+            /// Copy or move the remembered items here (Ctrl+V).
+            PasteItems,
+            /// Name editor: caret left.
+            EditLeft,
+            /// Name editor: caret right.
+            EditRight,
+            /// Name editor: extend the selection left.
+            EditSelectLeft,
+            /// Name editor: extend the selection right.
+            EditSelectRight,
+            /// Name editor: caret to the start.
+            EditHome,
+            /// Name editor: caret to the end.
+            EditEnd,
+            /// Name editor: delete before the caret.
+            EditBackspace,
+            /// Name editor: delete after the caret.
+            EditDelete,
+            /// Name editor: select the whole name.
+            EditSelectAll,
+            /// Name editor: keep the new name.
+            EditCommit,
+            /// Name editor: leave the name as it was.
+            EditCancel,
+        ]
+    );
+}
+
 /// Actions of Quick Look. The panel handles them in its own window (the arrow keys, Close, the
 /// tabs); the workspace handles Toggle and Open in the main window, where the list is.
 pub mod quick_look {
@@ -258,6 +314,8 @@ pub mod quick_look {
             Toggle,
             /// Close the panel and return to the list (Escape).
             Close,
+            /// Full screen on or off (F11, Ctrl+Cmd+F on macOS).
+            ToggleFullscreen,
             /// Show the next tab.
             NextTab,
             /// Show the previous tab.
@@ -411,6 +469,8 @@ pub mod workspace {
             CopyToComputer,
             /// Show the folder as a list (Ctrl+1).
             ShowList,
+            /// Show the folder as icons (Ctrl+2).
+            ShowIcons,
             /// Show the folder as the space map (Ctrl+3).
             ShowSpaceMap,
             /// Open the disk view in Layout mode: where the selected file lies on the disk.
@@ -464,6 +524,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("pagedown", PageDown, list),
         KeyBinding::new("home", MoveToFirst, list),
         KeyBinding::new("end", MoveToLast, list),
+        KeyBinding::new("left", MoveLeft, list),
+        KeyBinding::new("right", MoveRight, list),
+        KeyBinding::new("shift-left", SelectLeft, list),
+        KeyBinding::new("shift-right", SelectRight, list),
         KeyBinding::new("shift-up", SelectUp, list),
         KeyBinding::new("shift-down", SelectDown, list),
         KeyBinding::new("shift-pageup", SelectPageUp, list),
@@ -477,10 +541,31 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-enter", ShowInFolder, list),
         KeyBinding::new("shift-enter", OpenInApp, list),
         KeyBinding::new("secondary-shift-c", CopyToComputer, list),
+        KeyBinding::new("f2", host_ops::Rename, list),
+        KeyBinding::new("secondary-shift-n", host_ops::NewFolder, list),
+        KeyBinding::new("delete", host_ops::MoveToTrash, list),
+        KeyBinding::new("secondary-z", host_ops::Undo, list),
+        KeyBinding::new("secondary-c", host_ops::CopyItems, list),
+        KeyBinding::new("secondary-x", host_ops::CutItems, list),
+        KeyBinding::new("secondary-v", host_ops::PasteItems, list),
         // The list hands Space back when it continues a name being typed.
         KeyBinding::new("space", quick_look::Toggle, list),
         KeyBinding::new("menu", menu::Open, list),
         KeyBinding::new("shift-f10", menu::Open, list),
+    ]);
+    let editing = Some(RENAMING);
+    cx.bind_keys([
+        KeyBinding::new("left", host_ops::EditLeft, editing),
+        KeyBinding::new("right", host_ops::EditRight, editing),
+        KeyBinding::new("shift-left", host_ops::EditSelectLeft, editing),
+        KeyBinding::new("shift-right", host_ops::EditSelectRight, editing),
+        KeyBinding::new("home", host_ops::EditHome, editing),
+        KeyBinding::new("end", host_ops::EditEnd, editing),
+        KeyBinding::new("backspace", host_ops::EditBackspace, editing),
+        KeyBinding::new("delete", host_ops::EditDelete, editing),
+        KeyBinding::new("secondary-a", host_ops::EditSelectAll, editing),
+        KeyBinding::new("enter", host_ops::EditCommit, editing),
+        KeyBinding::new("escape", host_ops::EditCancel, editing),
     ]);
     cx.bind_keys([
         KeyBinding::new("menu", menu::Open, Some(SIDEBAR)),
@@ -504,11 +589,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-.", ToggleHidden, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-1", ShowList, None),
+        KeyBinding::new("secondary-2", ShowIcons, None),
         KeyBinding::new("secondary-3", ShowSpaceMap, None),
         // Ctrl on every platform, as the design says: Cmd+Tab is the system's.
         KeyBinding::new("ctrl-tab", quick_look::NextTab, None),
         KeyBinding::new("ctrl-shift-tab", quick_look::PreviousTab, None),
         KeyBinding::new("secondary-g", quick_look::GoToByte, None),
+        KeyBinding::new("f11", quick_look::ToggleFullscreen, Some(QUICK_LOOK)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-cmd-f", quick_look::ToggleFullscreen, Some(QUICK_LOOK)),
     ]);
     // Escape and Ctrl+W close any auxiliary window. Quick Look's own Escape and Space (below) are in
     // a deeper context, and GPUI tries the deepest matching context first, so they win there.
