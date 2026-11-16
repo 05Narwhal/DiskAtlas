@@ -1428,6 +1428,7 @@ version = "26.0.1-alpha"
 dependencies = [
  "base64",
  "bzip2",
+ "ext4-view",
  "lzfse_rust",
  "lzma-rs",
  "memchr",
@@ -1687,6 +1688,16 @@ dependencies = [
  "rayon-core",
  "smallvec",
  "zune-inflate",
+]
+
+[[package]]
+name = "ext4-view"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecf6379b7cfeace5e109ccc51955afc05f5f7f2466ae0cf2697bda46afd01e6"
+dependencies = [
+ "bitflags 2.13.2",
+ "crc",
 ]
 
 [[package]]
