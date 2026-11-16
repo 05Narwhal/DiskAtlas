@@ -21,6 +21,8 @@
 
 /// What became of a restart request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Only the Windows implementation constructs these; the others never restart.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum Restart {
     /// The elevated copy is starting. The caller quits this one.
     Started,

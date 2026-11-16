@@ -66,7 +66,7 @@ jobs:
   # libFuzzer's sanitizer flags. The engine has no GPUI dependency, so no
   # system packages are needed. Seeds come from the HFS+ test volume builder.
   fuzz:
-    name: fuzz (60 s per target)
+    name: fuzz (30 s per target)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,28 +83,20 @@ jobs:
         with:
           tool: cargo-fuzz
 
-      - name: Generate seed corpus
-        env:
-          DISK_ATLAS_FUZZ_SEEDS: ${{ github.workspace }}/fuzz/seeds
-        run: cargo test -p disk-atlas-lib --lib write_fuzz_seeds -- --ignored
-
+      # Every target in fuzz/fuzz_targets, 30 s each (tools/fuzz-all.sh writes
+      # the seeds first). The triple is named because the prebuilt cargo-fuzz
+      # is a musl binary, and cargo-fuzz defaults to its own host triple.
       - name: Fuzz
-        run: |
-          # -max_len must exceed libFuzzer's 4096 default or the HFS+ seeds
-          # are truncated.
-          # Absolute corpus paths: cargo-fuzz may run the fuzzer from fuzz/.
-          for target in probe partition_map hfsplus_volume_header hfsplus_mount hfsplus_journal decmpfs udif sparseimage plist search_index_load; do
-            corpus="$GITHUB_WORKSPACE/fuzz/corpus/$target"
-            seeds="$GITHUB_WORKSPACE/fuzz/seeds/$target"
-            mkdir -p "$corpus" "$seeds"
-            cargo fuzz run --fuzz-dir fuzz "$target" "$corpus" "$seeds" \
-              -- -max_total_time=60 -max_len=1048576
-          done
+        env:
+          FUZZ_TRIPLE: x86_64-unknown-linux-gnu
+        run: tools/fuzz-all.sh 30
 
-      - name: Upload crashing inputs
+      - name: Upload crashing inputs and logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts
-          path: fuzz/artifacts
+          path: |
+            fuzz/artifacts
+            fuzz/logs
           if-no-files-found: ignore

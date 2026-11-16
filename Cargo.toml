@@ -135,3 +135,6 @@ debug = "line-tables-only"
 
 [patch.crates-io]
 ext4-view = { path = "vendor/ext4-view" }
+# xattr 0.2.3 (through gpui) does not build on Linux with libc 0.2.191; see
+# vendor/xattr/PATCHES.md.
+xattr = { path = "vendor/xattr" }

@@ -19,6 +19,10 @@
 #
 #   tools/fuzz-all.sh [seconds per target, default 60] [target ...]
 #
+# FUZZ_TRIPLE=x86_64-unknown-linux-gnu names the target to build for; CI sets
+# it because a cargo-fuzz built for musl would otherwise pick the musl target,
+# where the sanitizer cannot link. The exit status is 1 if any target failed.
+#
 # Linux or macOS, nightly toolchain, cargo-fuzz installed. Seeds are written
 # first. Logs go to fuzz/logs/<target>.log, results to fuzz/logs/summary.txt,
 # and a crash leaves its input in fuzz/artifacts/<target>/. Run it from a
@@ -33,6 +37,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ROOT="$PWD"
 TARGETS="${*:-$(cd fuzz/fuzz_targets && ls *.rs | sed 's/\.rs$//')}"
 
+FAILED=0
+TRIPLE_ARGS=()
+[ -n "${FUZZ_TRIPLE:-}" ] && TRIPLE_ARGS=(--target "$FUZZ_TRIPLE")
+
 mkdir -p fuzz/logs
 : > fuzz/logs/summary.txt
 
@@ -45,7 +53,7 @@ for t in $TARGETS; do
     started=$(date +%s)
     # -timeout: a hang is a bug (every loop on disk data is bounded).
     # Absolute corpus paths: cargo-fuzz may run the fuzzer from fuzz/.
-    cargo fuzz run --fuzz-dir fuzz "$t" "$ROOT/fuzz/corpus/$t" "$ROOT/fuzz/seeds/$t" \
+    cargo fuzz run ${TRIPLE_ARGS[@]+"${TRIPLE_ARGS[@]}"} --fuzz-dir fuzz "$t" "$ROOT/fuzz/corpus/$t" "$ROOT/fuzz/seeds/$t" \
         -- -max_total_time="$SECS" -max_len=1048576 -timeout=10 -rss_limit_mb=2048 \
         > "fuzz/logs/$t.log" 2>&1
     rc=$?
@@ -55,6 +63,8 @@ for t in $TARGETS; do
         echo "ok     $t (${took}s) $stats" | tee -a fuzz/logs/summary.txt
     else
         echo "FAILED $t (rc $rc, ${took}s) see fuzz/logs/$t.log" | tee -a fuzz/logs/summary.txt
+        FAILED=1
     fi
 done
 echo "done"
+exit "$FAILED"

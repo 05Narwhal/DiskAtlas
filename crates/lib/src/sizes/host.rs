@@ -2792,6 +2792,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[allow(clippy::print_stdout)]
     #[test]
     fn unreadable_by_permission_gives_at_least() {
         use std::os::unix::fs::PermissionsExt;
