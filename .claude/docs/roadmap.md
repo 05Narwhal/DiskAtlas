@@ -161,9 +161,9 @@ Gate for every task with something to see: a dark-theme screenshot of the runnin
 - [ ] **R6** O pipeline, S views. Thumbnails and icon view (`r1` §1.7). This is the icon view M8 listed.
 - [x] **R7** (Done 2026-11-15 with R15.2; details and what is not built under `r1` §11. fmt, clippy and tests green; layout 0.95 ms and aggregation of 1,000,001 entries 11.5 ms, both inside budget. Seen in both themes except the zoom in motion; arrow keys and the region menu are not built.) O, S. Disk view and space map (`r1` §3.4, §3.5), reading `IndexSizes` and `HostSizes`; with it R15.2.
 - [ ] **R8** O operations and undo, S interface. Host file operations (`r1` §4). Adds `trash` (Julian approved the crate on 2026-11-14; the lead still checks its licence against GPL-3.0-or-later and its maintenance before adding it).
-- [ ] **R17a** S, O. Mac conventions, tasks R17.1 to R17.6 (`r10` §5.2 to §5.4).
+- [x] **R17a** S, O. Mac conventions, tasks R17.1 to R17.6 (`r10` §5.2 to §5.4). Done on `lane-c-formats` 2026-11-15: every reader in `crates/lib/src/mac/` (`appledouble`, `bplist`, `xattr`, `bundle`, `trash`, `resource_map`, `alias`, `original`, `ds_store`, `sidecar_fs`) has a valid and a hostile test and a fuzz target with seeds; the app joins are Properties (Where from, Downloaded, Tags, Comment), packages, label dots, Trash and Desktop rows, Show original. Not built: the "Was in" column, `finder_views`, classic label names in Properties, double-click on a package, trash rows highlighted as current (`r10` §14, 2026-11-15, lane C). Fuzz targets not yet run; no real `.DS_Store`, alias or bplist file was available (`ptbL`/`ptbN`, alias tags 14/15/18/19 and version 3 are unverified).
 - [ ] **R9** O. The device helper. **Moved to Later (2026-11-15):** the elevated relaunch already reads raw disks.
-- [ ] **Q1** (cut to the ICNS reader, lane C, 2026-11-15; PICT, the other no-crate previews and the 3D model parsers moved to Later) S. ICNS reader on `resource_map.rs` for R17b.
+- [x] **Q1** (cut to the ICNS reader, lane C, 2026-11-15; PICT, the other no-crate previews and the 3D model parsers moved to Later) S. ICNS reader on `resource_map.rs` for R17b. Done 2026-11-15: `mac/icns.rs`, `Icns::parse`, `best(px)`, `from_resource_fork`; PNG entries are returned as bytes, packed ARGB and RGB entries are decoded; JPEG 2000 entries wait for Q2.
 - [ ] **R17b** S, lane A. Custom icons (R17.7). "As arranged" (R17.8) is cut (decision 35 allows it): remove `finder_layout` from the settings table when R17b is done.
 - G0, G1, Q2, Q3: **moved to Later (2026-11-15).**
 
@@ -178,7 +178,7 @@ Design: `design/m6-hfs.md`.
 - [x] O: MDB, catalog and extents on the shared B-tree reader. (Tasks 2 to 6 of `m6-hfs.md` §7 done in `lane-c-m6`, merged into `dev` 2026-11-15, with fuzz targets `hfs_mount`, `hfs_records`, `dc42`; not yet run.)
 - [x] S: Mac OS Roman and other script encodings.
 - [x] S: DiskCopy 4.2 images.
-- [ ] S: Task 7, the app: `local_times` in `format.rs`, Mac OS Roman in the text preview and the bytes view's text column. Lane C, first.
+- [x] S: Task 7, the app: `local_times` in `format.rs`, Mac OS Roman in the text preview and the bytes view's text column. Done: the list, Properties and Quick Look show stored dates on `local_times` volumes; HFS volumes and TEXT files read as Mac OS Roman in the preview and bytes text column.
 
 ## M7. APFS, read-only
 
@@ -195,7 +195,7 @@ Design: `design/m7-apfs.md`.
 Design: `design/m8-formats-plugins.md`.
 
 - [x] F: Choose crates or in-house readers for FAT, exFAT, NTFS, ext4, ISO 9660, UDF. Checked 2026-11-12 (`design/m8-formats-plugins.md` §1): `ext4-view` 1.0.0 passes; `ntfs` 0.4.0 fails the freshness test (last release June 2023). Waiting for Julian: approve `ext4-view`, decide NTFS.
-- [ ] S or O per format: FAT, exFAT, ISO 9660 (S), ext through the crate (S), UDF (O), NTFS as Julian decides.
+- [ ] S or O per format: FAT, exFAT, ISO 9660 (S), ext through the crate (S), UDF (O), NTFS as Julian decides. Progress on `lane-c-formats` 2026-11-16: FAT12/16/32 (`fs/fat/`) and exFAT (`fs/exfat/`) are built, mount through `fs::probe::mount`, and each has a valid and a hostile test set, a fuzz target (`fat_mount`, `exfat_mount`) and seeds. ISO 9660 with Joliet and Rock Ridge (`fs/iso9660/`, fuzz target `iso9660_mount`, built 2026-11-16, fuzzed 60 s clean). UDF (`fs/udf/`, fuzz target `udf_mount`, built 2026-11-16 against in-house test images only; fuzz run pending, real fixtures from Julian still wanted). ext is not started.
 - [x] F: Plugin design (the README's goal of extensions that are not compiled in). `design/provider-protocol.md`: the byte-level protocol for extensions and the elevated helper.
 - [ ] O: `ipc/` and `RemoteFs` from the specification. **Moved to Later (2026-11-15)**, with the example extension and extensions in Settings.
 - [ ] S: Pinned folders. Lane D.

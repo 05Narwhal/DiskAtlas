@@ -33,6 +33,7 @@ use disk_atlas_lib::error::Error;
 use disk_atlas_lib::fs::{
     EntryFlags, FileSystem, Metadata, NodeId, NodeKind, Stream, VolumeIdentity, VolumeInfo,
 };
+use disk_atlas_lib::mac::xattr::read_attributes;
 use disk_atlas_lib::search::Index;
 use disk_atlas_lib::search::kind::classify_entry;
 use disk_atlas_lib::sizes::{ClassBytes, IndexSizes, Totals};
@@ -44,7 +45,7 @@ use crate::state::facts::{
     DiskDescription, FactLink, HostFlags, ItemFacts, LISTED_LARGEST, LargestItem, PartitionFacts,
     PartitionRow, PieceStrip, SectionId, SectionState, copy_everything, disk_sections,
     general_item, inside_section, mac_item, on_disk_item, permissions_item, scheme_name,
-    several_items, subtitle, volume_sections, xattrs_item,
+    several_items, subtitle, volume_sections, xattrs_with_mac,
 };
 use crate::state::listing::{Listing, Reach};
 use crate::state::navigation::{Crumb, Location, Navigation};
@@ -1568,8 +1569,16 @@ impl Properties {
         }
         if !host {
             let fs = Arc::clone(&fs);
+            let (dir, item_name) = (parent, name.to_string());
             self.spawn_section(cx, SectionId::Xattrs, move || {
-                xattrs_item(
+                let mut mac = read_attributes(fs.as_ref(), node);
+                // The Finder keeps comments in the folder's `.DS_Store` as well.
+                if mac.comment.is_none() {
+                    mac.comment = disk_atlas_lib::mac::ds_store::read_store(fs.as_ref(), dir)
+                        .and_then(|store| store.comment(&item_name).map(str::to_owned));
+                }
+                xattrs_with_mac(
+                    &mac,
                     &fs.xattrs(node)
                         .map_err(|error| read_error("extended attributes", &error)),
                 )

@@ -294,15 +294,23 @@ pub fn mount(source: Arc<dyn BlockSource>, content: Content) -> Result<Option<Mo
             Ok(Some(Mount::Volume(Arc::new(hfsplus::mount(source)?))))
         }
         Content::Hfs => Ok(Some(Mount::Volume(Arc::new(hfs::mount(source)?)))),
+        Content::ExFat => Ok(Some(Mount::Volume(Arc::new(crate::fs::exfat::mount(
+            source,
+        )?)))),
+        Content::Iso9660 => Ok(Some(Mount::Volume(Arc::new(crate::fs::iso9660::mount(
+            source,
+        )?)))),
+        Content::Fat => Ok(Some(Mount::Volume(Arc::new(crate::fs::fat::mount(
+            source,
+        )?)))),
+        Content::Udf => Ok(Some(Mount::Volume(Arc::new(crate::fs::udf::mount(
+            source,
+        )?)))),
         Content::Apfs
         | Content::Mfs
         | Content::CoreStorage
         | Content::Ntfs
-        | Content::ExFat
-        | Content::Fat
         | Content::Ext
-        | Content::Udf
-        | Content::Iso9660
         | Content::Empty
         | Content::Unknown => Ok(None),
     }

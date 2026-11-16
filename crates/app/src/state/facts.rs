@@ -25,6 +25,7 @@ use disk_atlas_lib::fs::{
     EntryFlags, Extent, FinderCodes, JournalState, Metadata, NodeId, NodeKind, Owner, Stream,
     Timestamp, VolumeIdentity, VolumeInfo, XattrInfo,
 };
+use disk_atlas_lib::mac::xattr::MacAttributes;
 use disk_atlas_lib::partition::Scheme;
 use disk_atlas_lib::sizes::{ClassBytes, Totals};
 use gpui::SharedString;
@@ -953,6 +954,72 @@ pub fn xattrs_item(xattrs: &Result<Vec<XattrInfo>, SharedString>) -> SectionStat
     }
 }
 
+/// The Finder's tag colours in the order of the stored number, 1 to 7.
+fn tag_colour(colour: u8) -> Option<&'static str> {
+    [None, Some("Gray"), Some("Green"), Some("Purple"), Some("Blue"), Some("Yellow"), Some("Red"), Some("Orange")]
+        .get(usize::from(colour))
+        .copied()
+        .flatten()
+}
+
+/// What the Mac attributes say, in words: where a file came from, when and by what it was
+/// downloaded, its tags and its Finder comment. Empty when it has none of them.
+pub fn mac_attribute_facts(attributes: &MacAttributes) -> Vec<Fact> {
+    let mut rows = Vec::new();
+    if let Some(origin) = attributes.where_from.first() {
+        let mut fact = Fact::new("Where from", origin.clone());
+        if attributes.where_from.len() > 1 {
+            fact = fact.copying(attributes.where_from.join("
+"));
+        }
+        rows.push(fact);
+    }
+    if let Some(quarantine) = &attributes.quarantine {
+        let when = quarantine
+            .unix_seconds
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .map(|seconds| date_seconds(Timestamp::from_unix(seconds, 0), false));
+        let text = match (when, quarantine.agent.is_empty()) {
+            (Some(when), false) => format!("{when}, by {}", quarantine.agent),
+            (Some(when), true) => when,
+            (None, false) => format!("by {}", quarantine.agent),
+            (None, true) => "Downloaded".to_owned(),
+        };
+        rows.push(Fact::new("Downloaded", text));
+    }
+    if !attributes.tags.is_empty() {
+        let text = attributes
+            .tags
+            .iter()
+            .map(|tag| match tag_colour(tag.colour) {
+                Some(colour) => format!("{} ({colour})", tag.name),
+                None => tag.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.push(Fact::new("Tags", text));
+    }
+    if let Some(comment) = &attributes.comment {
+        rows.push(Fact::new("Comment", comment.clone()));
+    }
+    rows
+}
+
+/// The Extended attributes section: the Mac attributes in words first, then every attribute with
+/// the size of its value.
+pub fn xattrs_with_mac(
+    mac: &MacAttributes,
+    xattrs: &Result<Vec<XattrInfo>, SharedString>,
+) -> SectionState {
+    let mut rows = mac_attribute_facts(mac);
+    match xattrs_item(xattrs) {
+        SectionState::Ready(list) => rows.extend(list),
+        SectionState::Failed(text) if rows.is_empty() => return SectionState::Failed(text),
+        _ => {}
+    }
+    ready_or_absent(rows)
+}
+
 /// What is inside a folder, a package, a volume or several items: the storage bar's legend as
 /// rows, then the five largest items. `lower_bound` adds a note. `Absent` when there is nothing.
 pub fn inside_section(
@@ -1147,6 +1214,29 @@ pub fn copy_everything(title: &str, sections: &[(SectionId, SectionState)]) -> S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mac_attributes_read_in_words() {
+        use disk_atlas_lib::mac::xattr::{Quarantine, Tag};
+        let attributes = MacAttributes {
+            quarantine: Some(Quarantine {
+                flags: 0x83,
+                unix_seconds: Some(86_400),
+                agent: "Safari".into(),
+                uuid: None,
+            }),
+            where_from: vec!["https://a.example/f.zip".into()],
+            tags: vec![Tag { name: "Work".into(), colour: 6 }, Tag { name: "Plain".into(), colour: 0 }],
+            comment: None,
+        };
+        let rows = mac_attribute_facts(&attributes);
+        let text: Vec<(&str, &str)> = rows.iter().map(|f| (f.label.as_ref(), f.value.as_ref())).collect();
+        assert_eq!(text[0], ("Where from", "https://a.example/f.zip"));
+        assert_eq!(text[1].0, "Downloaded");
+        assert!(text[1].1.ends_with(", by Safari"));
+        assert_eq!(text[2], ("Tags", "Work (Red), Plain"));
+        assert!(mac_attribute_facts(&MacAttributes::default()).is_empty());
+    }
+
     use super::*;
 
     #[test]

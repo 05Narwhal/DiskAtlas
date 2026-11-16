@@ -224,6 +224,12 @@ impl BytesView {
         self.dragging = false;
         self.serial += 1;
         let serial = self.serial;
+        // `info` answers from memory. A classic HFS volume's text is Mac OS Roman.
+        let column = if fs.info().format == Some("HFS") {
+            TextColumn::MacRoman
+        } else {
+            TextColumn::Ascii
+        };
         self.open_task = Some(cx.spawn(async move |this, cx| {
             let (node, stream) = (key.node, key.stream);
             let opened = cx
@@ -241,7 +247,7 @@ impl BytesView {
                             .borrow()
                             .base_handle
                             .set_offset(point(Pixels::ZERO, Pixels::ZERO));
-                        Load::Ready(Box::new(Data::new(source, serial)))
+                        Load::Ready(Box::new(Data::new(source, serial, column)))
                     }
                     Err(error) => {
                         Load::Failed(format!("The bytes could not be read ({error}).").into())
@@ -626,7 +632,7 @@ fn this_stream(key: &Option<Key>) -> Stream {
 }
 
 impl Data {
-    fn new(source: Arc<dyn BlockSource>, serial: u64) -> Self {
+    fn new(source: Arc<dyn BlockSource>, serial: u64, column: TextColumn) -> Self {
         let len = source.len();
         let mut pages = PageCache::default();
         pages.reset();
@@ -639,7 +645,7 @@ impl Data {
             selection: None,
             structures: Vec::new(),
             touched: Vec::new(),
-            column: TextColumn::Ascii,
+            column,
             digits: bytes::offset_digits(len),
         }
     }

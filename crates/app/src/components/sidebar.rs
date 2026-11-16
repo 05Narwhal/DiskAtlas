@@ -47,6 +47,7 @@ use crate::keymap::{SIDEBAR, context, menu as menu_keys};
 use crate::state::menus::{
     BUILT, DiskFacts, MenuState, MenuTarget, VolumeFacts, build, file_manager_name,
 };
+use disk_atlas_lib::mac::trash::TrashFolder;
 use crate::state::navigation::{Location, Navigation};
 use crate::state::order::SortSpec;
 use crate::state::properties::{PropertiesTarget, PropertiesWindows, Request};
@@ -581,6 +582,46 @@ impl Sidebar {
         }
     }
 
+    /// A Trash or Desktop row under a volume: it opens that folder of the volume.
+    fn trash_row(
+        &self,
+        index: usize,
+        source: &Source,
+        folder: &TrashFolder,
+        colors: &Colors,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let to = Location::root(source).child(folder.node, folder.label.clone());
+        let (hover, pressed) = (colors.hover, colors.field);
+        div()
+            .id(("sidebar-trash-row", index))
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .h(Density::default().sidebar_row_height())
+            .pl(metrics::ROW_PADDING + space::S8 + space::S8)
+            .pr(space::S8)
+            .gap(space::S8)
+            .rounded(radius::ROW)
+            .cursor_pointer()
+            .text_color(colors.ink2)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let to = to.clone();
+                this.navigation
+                    .update(cx, |navigation, cx| navigation.navigate(to, cx));
+            }))
+            .hover(move |style| style.bg(hover))
+            .active(move |style| style.bg(pressed))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(folder.label.clone())),
+            )
+    }
+
     /// The rows of one disk: a heading with its bar, its listed volumes and, when there are any,
     /// its "other partitions". A disk that failed to open is one row. `next_index` numbers the
     /// rows for their element ids.
@@ -643,6 +684,15 @@ impl Sidebar {
                         )
                         .into_any_element(),
                     );
+                    if BUILT.trash_rows {
+                        for folder in sources.trash(source.id) {
+                            *next_index += 1;
+                            rows.push(
+                                self.trash_row(*next_index, source, folder, colors, cx)
+                                    .into_any_element(),
+                            );
+                        }
+                    }
                 }
                 Placement::Other(reason) => others.push((source, reason)),
             }

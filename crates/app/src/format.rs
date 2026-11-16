@@ -63,6 +63,15 @@ pub fn date_time(time: Timestamp) -> String {
     date_time_at_offset(time, offset.local_minus_utc())
 }
 
+/// [`date_time`], or the stored fields unconverted when the volume keeps local times.
+pub fn date_time_on(time: Timestamp, local_times: bool) -> String {
+    if local_times {
+        date_time_at_offset(time, 0)
+    } else {
+        date_time(time)
+    }
+}
+
 /// The same text for an explicit UTC offset in seconds. `date_time` calls this; tests use it.
 pub fn date_time_at_offset(time: Timestamp, utc_offset_seconds: i32) -> String {
     let shown = DateTime::from_timestamp(time.unix_seconds(), 0)
@@ -425,6 +434,12 @@ mod tests {
         assert_eq!(date_time_at_offset(epoch, 0), "1 Jan 1970, 00:00");
         assert_eq!(date_time_at_offset(epoch, 3600), "1 Jan 1970, 01:00");
         assert_eq!(date_time_at_offset(epoch, -3600), "31 Dec 1969, 23:00");
+    }
+
+    #[test]
+    fn local_times_are_shown_as_stored() {
+        let time = Timestamp::from_unix(86_400 + 3600 * 13, 0);
+        assert_eq!(date_time_on(time, true), "2 Jan 1970, 13:00");
     }
 
     #[test]

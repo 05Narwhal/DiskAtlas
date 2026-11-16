@@ -105,6 +105,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "exfat_mount"
+path = "fuzz_targets/exfat_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_mount"
+path = "fuzz_targets/fat_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "hfs_mount"
 path = "fuzz_targets/hfs_mount.rs"
 test = false
@@ -114,6 +128,69 @@ bench = false
 [[bin]]
 name = "hfs_records"
 path = "fuzz_targets/hfs_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "appledouble"
+path = "fuzz_targets/appledouble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bplist"
+path = "fuzz_targets/bplist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trash_info"
+path = "fuzz_targets/trash_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_map"
+path = "fuzz_targets/resource_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "alias_record"
+path = "fuzz_targets/alias_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ds_store"
+path = "fuzz_targets/ds_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icns"
+path = "fuzz_targets/icns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iso9660_mount"
+path = "fuzz_targets/iso9660_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udf_mount"
+path = "fuzz_targets/udf_mount.rs"
 test = false
 doc = false
 bench = false

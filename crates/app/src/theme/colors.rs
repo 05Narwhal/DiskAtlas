@@ -148,6 +148,23 @@ const NIGHT: Palette = Palette {
     wash_alpha: 0.13,
 };
 
+/// The colour of a Finder label, 1 to 7 (`r10-everyday.md` 5.4). Fixed data colours, the same in
+/// both themes: a label means a colour, not a surface. Violet is `#8E5BD9` so it reads apart
+/// from the overprint magenta. `None` for 0 and for anything above 7.
+pub fn label_colour(label: u8) -> Option<Hsla> {
+    let hex = match label {
+        1 => 0x9A9A9A, // Gray
+        2 => 0x4CAF50, // Green
+        3 => 0x8E5BD9, // Purple
+        4 => 0x3B82F6, // Blue
+        5 => 0xEAB308, // Yellow
+        6 => 0xE5484D, // Red
+        7 => 0xF08A24, // Orange
+        _ => return None,
+    };
+    Some(rgb(hex).into())
+}
+
 impl Colors {
     fn from_palette(p: &Palette) -> Self {
         let c = |hex: u32| -> Hsla { rgb(hex).into() };
