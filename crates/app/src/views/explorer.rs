@@ -432,6 +432,8 @@ pub struct Explorer {
     renaming: Option<Renaming>,
     /// What Ctrl+Z takes back.
     undo: UndoStack,
+    /// True while a confirmation prompt waits for an answer; Ctrl+Z does nothing then.
+    prompt_open: bool,
     /// What Ctrl+C or Ctrl+X remembered.
     ops_clipboard: Option<OpsClipboard>,
     /// The last operation's failure, shown under the list until the next action.
@@ -531,6 +533,7 @@ impl Explorer {
             view,
             renaming: None,
             undo: UndoStack::default(),
+            prompt_open: false,
             ops_clipboard: None,
             ops_notice: None,
             pending_select: None,
@@ -1452,8 +1455,11 @@ impl Explorer {
             &[move_label.as_str(), "Cancel"],
             cx,
         );
+        self.prompt_open = true;
         cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
+            let answer = answer.await;
+            this.update(cx, |this, _| this.prompt_open = false).ok();
+            if answer != Ok(0) {
                 return;
             }
             this.update_in(cx, |this, window, cx| {
@@ -1477,6 +1483,9 @@ impl Explorer {
 
     /// Ctrl+Z: takes back the last operation.
     fn undo(&mut self, _: &host_ops::Undo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prompt_open {
+            return;
+        }
         let Some(step) = self.undo.pop() else {
             return;
         };
@@ -1542,7 +1551,8 @@ impl Explorer {
                     format!("{taken} items with those names are already here.")
                 };
                 let answer = this
-                    .update_in(cx, |_, window, cx| {
+                    .update_in(cx, |this, window, cx| {
+                        this.prompt_open = true;
                         window.prompt(
                             gpui::PromptLevel::Warning,
                             &question,
@@ -1553,7 +1563,11 @@ impl Explorer {
                     })
                     .ok();
                 match answer {
-                    Some(answer) => match answer.await {
+                    Some(answer) => match {
+                        let result = answer.await;
+                        this.update(cx, |this, _| this.prompt_open = false).ok();
+                        result
+                    } {
                         Ok(0) => Conflict::Replace,
                         Ok(1) => Conflict::KeepBoth,
                         Ok(2) => Conflict::Skip,
