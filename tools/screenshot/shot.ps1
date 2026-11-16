@@ -54,14 +54,16 @@ public static class ShotNative {
         try { SetProcessDPIAware(); } catch { }
     }
 
-    // Visible top-level window whose title contains `sub`; the largest wins.
+    // Visible top-level window whose title contains `sub` (equals it when `sub` starts with '='); the largest wins.
     public static IntPtr Find(string sub) {
         IntPtr best = IntPtr.Zero; long bestArea = -1;
         EnumWindows((h, l) => {
             if (!IsWindowVisible(h)) return true;
             var sb = new StringBuilder(512);
             GetWindowText(h, sb, 512);
-            if (sb.Length == 0 || sb.ToString().IndexOf(sub, StringComparison.OrdinalIgnoreCase) < 0) return true;
+            if (sb.Length == 0) return true;
+            if (sub.StartsWith("=")) { if (!sb.ToString().Equals(sub.Substring(1), StringComparison.OrdinalIgnoreCase)) return true; }
+            else if (sb.ToString().IndexOf(sub, StringComparison.OrdinalIgnoreCase) < 0) return true;
             RECT r; GetWindowRect(h, out r);
             long a = (long)(r.R - r.L) * (r.B - r.T);
             if (a > bestArea) { bestArea = a; best = h; }
