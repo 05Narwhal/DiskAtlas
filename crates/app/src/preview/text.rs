@@ -23,6 +23,7 @@
 
 use std::sync::atomic::AtomicBool;
 
+use disk_atlas_lib::fs::hfs::encoding::Encoding;
 use disk_atlas_lib::io::block::BlockSource;
 
 use super::{Content, MAX_TEXT_BYTES, PreviewProvider, Sniff, Subject, TextPreview, read_prefix};
@@ -119,12 +120,14 @@ fn looks_like_text(head: &[u8]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SingleByte {
     Windows1252,
+    MacRoman,
 }
 
 impl SingleByte {
     fn name(self) -> &'static str {
         match self {
             Self::Windows1252 => "Western (Windows-1252)",
+            Self::MacRoman => Encoding::Roman.name(),
         }
     }
 }
@@ -132,14 +135,17 @@ impl SingleByte {
 /// The single-byte encoding to fall back to. The one place the choice is
 /// made.
 fn fallback(subject: &Subject) -> SingleByte {
-    // TODO(M6): a classic HFS volume, or a file whose type code is TEXT,
-    // is Mac OS Roman. The Roman table lands with M6; until then both read
-    // as Windows-1252, which agrees with it for ASCII and nothing above.
-    let _roman = subject.format == Some("HFS")
+    // A classic HFS volume, or a file whose type code is TEXT, is Mac OS
+    // Roman.
+    let roman = subject.format == Some("HFS")
         || subject
             .finder_codes
             .is_some_and(|codes| codes.file_type == TEXT_TYPE);
-    SingleByte::Windows1252
+    if roman {
+        SingleByte::MacRoman
+    } else {
+        SingleByte::Windows1252
+    }
 }
 
 /// Decodes `bytes`; the first of: a byte-order mark, UTF-8, the fallback.
@@ -182,6 +188,11 @@ fn decode(bytes: &[u8], truncated: bool, fallback: SingleByte) -> (String, &'sta
     }
     let text = match fallback {
         SingleByte::Windows1252 => bytes.iter().map(|&b| windows_1252(b)).collect(),
+        SingleByte::MacRoman => {
+            let mut text = String::new();
+            Encoding::Roman.decode_into(bytes, &mut text);
+            text
+        }
     };
     (text, fallback.name())
 }
@@ -419,10 +430,11 @@ mod tests {
     }
 
     #[test]
-    fn classic_mac_text_reads_as_the_fallback_until_m6() {
-        // TODO(M6): this becomes Mac OS Roman with its own table.
-        let hfs = load_subject(&subject(Some(b"TEXT"), Some("HFS")), b"caf\xE9", 4);
-        assert_eq!(hfs.text(), "caf\u{E9}");
+    fn classic_mac_text_reads_as_mac_os_roman() {
+        // 0x8E is é and 0xA5 the bullet in Roman.
+        let hfs = load_subject(&subject(Some(b"TEXT"), Some("HFS")), b"caf\x8E \xA5", 8);
+        assert_eq!(hfs.encoding, "Mac OS Roman");
+        assert_eq!(hfs.text(), "caf\u{E9} \u{2022}");
     }
 
     #[test]

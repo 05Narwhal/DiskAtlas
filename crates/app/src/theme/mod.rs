@@ -123,6 +123,8 @@ pub mod metrics {
 
     /// Horizontal inset of list rows and the column header from the list's edges.
     pub const ROW_INSET: Pixels = px(6.);
+    /// The Finder label dot before a name.
+    pub const LABEL_DOT: Pixels = px(8.);
     /// Horizontal padding inside a list row, a sidebar row and the column header.
     pub const ROW_PADDING: Pixels = px(10.);
     /// Gap between columns of the file list.

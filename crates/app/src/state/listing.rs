@@ -385,6 +385,17 @@ impl ResolvedIds {
     }
 }
 
+/// True unless `packages_as_folders` is on: packages are one item.
+fn packages_on(cx: &App) -> bool {
+    cx.try_global::<crate::state::settings::Settings>()
+        .is_none_or(|settings| !settings.bool_of("packages_as_folders"))
+}
+
+/// True when the entry is a package (a folder with a package's extension or the bundle bit).
+fn is_package_entry(entry: &disk_atlas_lib::fs::DirEntry<'_>) -> bool {
+    disk_atlas_lib::mac::bundle::is_package(entry.name, entry.kind, entry.flags)
+}
+
 /// How the one selected row is reached on its filesystem. Ids in an index built over a host
 /// folder are links inside that index only (`FIRST_SCAN_ID`): the filesystem answers `NotFound`
 /// to them. A hit there is reached by its names, which [`Reach::resolve`] walks on a background
@@ -566,6 +577,7 @@ pub struct Listing {
     location: Option<Location>,
     /// Whether the volume of `location` has resource forks, read once per navigation.
     resource_forks: bool,
+    local_times: bool,
     /// What mounting did with the volume's journal, read once per navigation.
     journal: Option<JournalState>,
     /// True when the source of `location` is the host: ids in its search index are scan-local.
@@ -649,6 +661,7 @@ impl Listing {
             sources,
             location: None,
             resource_forks: false,
+            local_times: false,
             journal: None,
             host: false,
             hit_epoch: 0,
@@ -702,6 +715,11 @@ impl Listing {
     /// True when the volume shown has resource forks: the list gets a Resource fork column.
     pub fn resource_forks(&self) -> bool {
         self.resource_forks
+    }
+
+    /// Whether the volume's dates carry no time zone and are shown as stored.
+    pub fn local_times(&self) -> bool {
+        self.local_times
     }
 
     /// What mounting did with the journal of the volume shown, when the format has one.
@@ -1451,7 +1469,96 @@ impl Listing {
         let Some(row) = self.row(position) else {
             return;
         };
-        if !row.entry.is_browsable() {
+        // A package is one item: Enter and double-click leave it to Quick Look.
+        if !row.entry.is_browsable() || packages_on(cx) && is_package_entry(&row.entry) {
+            return;
+        }
+        let node = row.entry.node;
+        let name = SharedString::from(row.entry.name.to_owned());
+        self.navigation
+            .update(cx, |navigation, cx| navigation.open_child(node, name, cx));
+    }
+
+    /// True when the row at `position` is a package shown as one item (the `packages_as_folders`
+    /// setting is off).
+    pub fn is_package_row(&self, position: usize, cx: &App) -> bool {
+        packages_on(cx)
+            && self
+                .row(position)
+                .is_some_and(|row| is_package_entry(&row.entry))
+    }
+
+    /// True when the row at `position` is a symbolic link or a classic alias.
+    pub fn is_link_row(&self, position: usize) -> bool {
+        self.row(position).is_some_and(|row| {
+            row.entry.kind == disk_atlas_lib::fs::NodeKind::Symlink
+                || (row.entry.kind == disk_atlas_lib::fs::NodeKind::File
+                    && row.entry.flags.contains(disk_atlas_lib::fs::EntryFlags::ALIAS))
+        })
+    }
+
+    /// "Show original": finds what the link or alias under the cursor points at, on a background
+    /// thread, and goes to its folder with the cursor on it.
+    pub fn show_original_cursor(&mut self, cx: &mut Context<Self>) {
+        let (Some(here), Some(position)) = (self.location.clone(), self.shown.cursor_position)
+        else {
+            return;
+        };
+        if self.results.is_some() || !self.is_link_row(position) {
+            return;
+        }
+        let Some(row) = self.row(position) else {
+            return;
+        };
+        let (node, name) = (row.entry.node, row.entry.name.to_owned());
+        let from: Vec<(NodeId, String)> = here
+            .crumbs()
+            .iter()
+            .skip(1)
+            .map(|crumb| (crumb.node, crumb.name.to_string()))
+            .collect();
+        let Some(root_name) = here.crumbs().first().map(|crumb| crumb.name.clone()) else {
+            return;
+        };
+        let fs = Arc::clone(here.fs());
+        let generation = self.generation;
+        self.activate_task = Some(cx.spawn(async move |this, cx| {
+            let resolved = cx
+                .background_executor()
+                .spawn(async move {
+                    disk_atlas_lib::mac::original::resolve(fs.as_ref(), &from, &name, node)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if generation != this.generation {
+                    return;
+                }
+                match resolved {
+                    Ok(disk_atlas_lib::mac::original::Resolved::Found(original)) => {
+                        let focus = SharedString::from(original.name);
+                        this.open_result_path(original.folder, &root_name, Some(focus), cx);
+                    }
+                    Ok(disk_atlas_lib::mac::original::Resolved::OtherVolume(volume)) => {
+                        this.shown.note =
+                            Some(format!("The original is on a disk called {volume}.").into());
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.shown.note = Some(failure_text(&error));
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// "Show package contents": goes inside the package under the cursor.
+    pub fn open_package_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.shown.cursor_position.and_then(|p| self.row(p)) else {
+            return;
+        };
+        if !row.entry.is_browsable() || self.results.is_some() {
             return;
         }
         let node = row.entry.node;
@@ -1668,6 +1775,7 @@ impl Listing {
         // render path reads the cached values.
         let info = self.location.as_ref().map(|location| location.fs().info());
         self.resource_forks = info.as_ref().is_some_and(|info| info.resource_forks);
+        self.local_times = info.as_ref().is_some_and(|info| info.local_times);
         self.journal = info.and_then(|info| info.journal);
         // A sort by a column this volume does not have would be invisible: go back to the default.
         if !self.resource_forks && self.shown.sort.column == SortColumn::ResourceFork {

@@ -271,3 +271,33 @@ Packaging: 15 S per platform; 16 Julian decides on signing and notarization.
 ## 11. Out of scope
 
 Write support of any kind; network filesystems; RAID, LVM, Core Storage, BitLocker, LUKS and other volume layers (each is a `BlockSource` over other sources and would get its own design); ZFS, Btrfs, XFS, ReFS (plugins are the intended route); automatic updates.
+
+## Changes during build
+
+2026-11-16, FAT and exFAT (lane C):
+
+- **FAT root node id.** The design makes the FAT32 root the first byte offset of the root cluster, but the first entry of the root directory is at that same offset, so a file there would share the root's id. The FAT32 root is the root cluster's first byte plus one; entry offsets are multiples of 32, so no entry can have it. exFAT does the same.
+- **FAT `identity`.** `None`, as designed. The volume serial is not used.
+- **exFAT entry sets that cross a cluster.** A node id is the offset of the `0x85` primary. When the primary is the last slot of a cluster of a directory, its `0xC0` stream slot is in the directory's next cluster, which a bare offset cannot find (a FAT-chained directory's clusters need not be adjacent). The listing and `lookup` remember such sets (stream slot offset and parsed meta, at most 1,048,576), so `metadata` and `open` answer for any node that was listed or looked up. A node id invented without listing its folder, which happens to be a crossing primary, is `NotFound`. Sets that do not cross are read from the offset alone.
+- **exFAT free space.** `info.free_bytes` is counted from the allocation bitmap at mount only when the bitmap is at most 1 MiB (volumes up to about 8M clusters); otherwise `None`. `allocation_map` reads the whole bitmap in 64 KiB pieces.
+- **exFAT set checksum.** Not verified. A set with a wrong checksum lists as written; sets with a bad secondary count, a first secondary that is not a stream extension, a name entry of the wrong type, a zero name length or too few name entries are skipped.
+- **Free-space and times.** FAT `free_bytes` counts zero entries in the in-memory FAT (`None` when the FAT is over 64 MiB). exFAT times are reported in UTC when the entry carries a valid offset, else as stored, and `local_times` is false; FAT times are local, `local_times` is true.
+
+
+2026-11-16, ISO 9660 (lane C):
+
+- **Root node id.** The root's id is the byte offset of the root record inside its volume descriptor (primary, or Joliet when that tree is shown). `.` and `..` records are skipped everywhere, including the root's own record, which the descriptor holds with name byte 0.
+- **Extended attribute records.** A record's content starts after its extended attribute length (`@1`, in blocks), as the specification says; the design did not mention it.
+- **Relocated folders.** The `CL` placeholder is listed as the folder; its content is at the `CL` block, whose first (`.`) record gives the length. `RE` records are hidden. `PL` is ignored.
+- **Multi-extent files.** A node is the first record. Its further extents are read forward from it (at most 65,536 records inside 1 MiB of the folder); the listing shows one entry with the summed size.
+- **Names.** Plain and Joliet lookups ignore case; Rock Ridge lookups are exact. `/` and NUL in any name become `_` so a name can never be a path. A Rock Ridge `NM` that is empty, `.` or `..` falls back to the ISO name.
+- **Rock Ridge scope.** `SP`, `NM`, `PX`, `SL`, `TF` (short and long forms), `CE` (8 per record), `RE`, `CL`, `ST`. Owner comes from `PX`; modification and access times from `TF` take precedence over the record date. A symbolic link opens as its stored target text, and its listed size is the target's length. Device nodes, fifos and sockets are `NodeKind::Other`.
+- **Not done.** CD-ROM XA system-use records before the `SP` entry, `allocation_map`, interleaved files, 2352-byte raw sectors and a "View as" choice for hybrid discs (as designed).
+
+2026-11-16, UDF (lane C):
+
+- **Built without real fixtures.** The reader and its test images (`fs/udf/test_image.rs`) were both written from the specification, so they agree with each other, not necessarily with real writers. Layouts tested: sector sizes 512, 2048 and 4096, physical and metadata partitions, file entries and extended file entries, short and long descriptors, embedded content, holes, a folder across blocks, and the reserve descriptor sequence. Still wanted from Julian: the DVD-ROM bridge image, a Blu-ray data image (2.50) and the Windows and macOS USB sticks named in §5.
+- **Short descriptors in a metadata partition (unconfirmed).** A short allocation descriptor is relative to the partition its file entry sits in. A regular file recorded in a metadata partition has its content in the physical partition below, so for those files short descriptors are read against that partition. Check this against a real 2.50 image.
+- **Not verified or not done.** FID tag locations are not checked (they need the folder's extent map); indirect entries and strategy 4096 are not followed; extended allocation descriptors, named streams, `allocation_map` and free space are not done; a virtual or sparable partition map fails the mount with `Error::Unsupported` naming it. A folder entry whose file entry cannot be read still lists, as a file or folder by its identifier flag with no size or date.
+- **Names.** OSTA 8- and 16-bit forms; `/` and NUL become `_`. Lookup is exact first, then ignoring case. Node id is partition reference number in the top 16 bits, block in the low 48, as designed.
+

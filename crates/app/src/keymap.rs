@@ -240,6 +240,10 @@ pub mod file_list {
             ShowInFolder,
             /// Open the file under the cursor in its own app (files of this computer).
             OpenInApp,
+            /// Go inside the package under the cursor.
+            ShowPackageContents,
+            /// Go to what the link or alias under the cursor points at.
+            ShowOriginal,
         ]
     );
 }

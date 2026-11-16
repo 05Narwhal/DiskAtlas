@@ -32,10 +32,14 @@ use crate::error::{CorruptKind, Corruption, Error, Location, Result};
 use crate::io::block::BlockSource;
 
 pub mod apfs;
+pub mod exfat;
+pub mod fat;
 pub mod hfs;
 pub mod hfsplus;
+pub mod iso9660;
 pub mod native;
 pub mod probe;
+pub mod udf;
 
 /// Names a file or folder within one [`FileSystem`]: the CNID on HFS, the
 /// inode number on APFS, an interned path on the host filesystem.

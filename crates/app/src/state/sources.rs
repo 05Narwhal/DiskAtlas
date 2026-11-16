@@ -35,6 +35,8 @@ use disk_atlas_lib::image;
 use disk_atlas_lib::io::block::{BlockSource, Slice};
 use disk_atlas_lib::io::cache::{CachedSource, ChunkCache, DEFAULT_BUDGET};
 use disk_atlas_lib::io::device::{self, DeviceInfo, HostVolume};
+use disk_atlas_lib::mac::sidecar_fs::SidecarFs;
+use disk_atlas_lib::mac::trash::{TrashFolder, find_trash};
 use disk_atlas_lib::partition::{self, Guid, Partition, PartitionType, Scheme, TypeHint};
 use gpui::{Context, EventEmitter, SharedString, Task};
 
@@ -337,6 +339,8 @@ struct PreparedVolume {
     /// `None` unless `availability` is [`Availability::Browsable`].
     fs: Option<Arc<dyn FileSystem>>,
     availability: Availability,
+    /// The Trash and Desktop folders that hold something (R17.4), found at mount time.
+    trash: Vec<TrashFolder>,
 }
 
 /// Mounts the volume `plan` describes when a reader exists for its format. A mounted volume
@@ -354,10 +358,12 @@ fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Prepared
             if !name.trim().is_empty() {
                 plan.label = name;
             }
+            let trash = find_trash(fs.as_ref());
             PreparedVolume {
                 plan,
                 fs: Some(fs),
                 availability: Availability::Browsable,
+                trash,
             }
         }
         // A container's volumes become one source each in M7 (design/m7-apfs.md §8); no reader
@@ -368,6 +374,7 @@ fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Prepared
             },
             plan,
             fs: None,
+            trash: Vec::new(),
         },
         Err(error) => PreparedVolume {
             availability: Availability::Failed(
@@ -375,6 +382,7 @@ fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Prepared
             ),
             plan,
             fs: None,
+            trash: Vec::new(),
         },
     }
 }
@@ -629,6 +637,8 @@ pub struct Sources {
     host_roots: Vec<(SourceId, PathBuf)>,
     /// Which physical disk each host drive letter lives on. Empty until the lookup is done.
     host_volumes: Vec<HostVolume>,
+    /// The Trash and Desktop rows of each volume that has any.
+    trash: Vec<(SourceId, Vec<TrashFolder>)>,
     next_id: u32,
     next_disk: u32,
     /// The one chunk cache every device and image reads through.
@@ -722,6 +732,7 @@ impl Sources {
             paths: Vec::new(),
             host_roots: Vec::new(),
             host_volumes: Vec::new(),
+            trash: Vec::new(),
             next_id: 0,
             next_disk: 0,
             cache,
@@ -796,6 +807,14 @@ impl Sources {
         host_covers_disk(disk.whole.is_some(), data, on_disk)
     }
 
+    /// The Trash and Desktop folders of volume `id` that hold something.
+    pub fn trash(&self, id: SourceId) -> &[TrashFolder] {
+        self.trash
+            .iter()
+            .find(|(source, _)| *source == id)
+            .map_or(&[], |(_, rows)| rows.as_slice())
+    }
+
     /// The source called `id`.
     pub fn source(&self, id: SourceId) -> Option<&Source> {
         self.items.iter().find(|source| source.id == id)
@@ -861,19 +880,36 @@ impl Sources {
         self.next_disk = self.next_disk.saturating_add(1);
         let label = SharedString::from(found.label);
 
+        // The setting is read when the disk is added: a change applies to disks opened after it.
+        let merge_sidecars = cx
+            .try_global::<crate::state::settings::Settings>()
+            .is_none_or(|settings| settings.bool_of("merge_sidecars"));
         let mut volume_ids = Vec::with_capacity(volumes.len());
         for PreparedVolume {
             plan,
             fs,
             availability,
+            trash,
         } in volumes
         {
             let id = self.next_source_id();
             volume_ids.push(id);
+            if !trash.is_empty() {
+                self.trash.push((id, trash));
+            }
             self.items.push(Source {
                 id,
                 group: found.group,
-                fs: fs.unwrap_or_else(|| Unavailable::arc(&plan.label)),
+                fs: fs.map_or_else(
+                    || Unavailable::arc(&plan.label),
+                    |fs| {
+                        if merge_sidecars {
+                            SidecarFs::wrap(fs)
+                        } else {
+                            fs
+                        }
+                    },
+                ),
                 label: SharedString::from(plan.label),
                 format: Some(SharedString::from(plan.format)),
                 kind: SourceKind::Volume {

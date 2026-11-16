@@ -72,8 +72,8 @@ pub const BUILT: Built = Built {
     layout_mode: true,
     pins: false,
     open_copy: false,
-    trash_rows: false,
-    show_original: false,
+    trash_rows: true,
+    show_original: true,
     visibility_toggles: true,
     copy_to_computer: true,
 };
@@ -94,6 +94,10 @@ pub struct RowFacts {
     pub folder: bool,
     /// A disk image or sparse bundle on the host: "Open in Disk Atlas" comes first.
     pub disk_image: bool,
+    /// A package shown as one item: Quick Look and "Show package contents" in place of "Open".
+    pub package: bool,
+    /// A symbolic link or a classic alias: "Show original" (R17.5).
+    pub original: bool,
 }
 
 /// What a disk heading or a failed whole-disk row offers.
@@ -268,13 +272,24 @@ fn rows_menu(
                 context::OpenInDiskAtlas,
             ));
         }
-        if row.folder {
+        if row.package {
+            open.push(MenuItem::action("Quick Look", quick_look::Toggle));
+            if !in_search {
+                open.push(MenuItem::action(
+                    "Show package contents",
+                    file_list::ShowPackageContents,
+                ));
+            }
+        } else if row.folder {
             open.push(MenuItem::action("Open", file_list::Open));
         } else if on_host {
             open.push(MenuItem::action("Open", file_list::OpenInApp));
         }
-        if !row.folder {
+        if !row.folder && !row.package {
             open.push(MenuItem::action("Quick Look", quick_look::Toggle));
+        }
+        if row.original && !in_search && state.built.show_original {
+            open.push(MenuItem::action("Show original", file_list::ShowOriginal));
         }
         if in_search {
             open.push(MenuItem::action(
@@ -547,6 +562,8 @@ mod tests {
         RowFacts {
             folder: false,
             disk_image: false,
+            package: false,
+            original: false,
         }
     }
 
@@ -688,6 +705,17 @@ mod tests {
                 "Properties"
             ]
         );
+    }
+
+    #[test]
+    fn a_package_offers_quick_look_and_its_contents_not_open() {
+        let package = RowFacts {
+            package: true,
+            ..folder("Thing.app")
+        };
+        let got = menu(&rows(source(true, false), vec![package], false));
+        assert_eq!(&got[..2], ["Quick Look", "Show package contents"]);
+        assert!(!got.contains(&"Open".to_string()));
     }
 
     #[test]

@@ -585,8 +585,10 @@ impl Explorer {
             let listing = self.listing.read(cx);
             listing
                 .cursor()
-                .and_then(|position| listing.row(position))
-                .is_some_and(|row| !row.entry.is_browsable())
+                .is_some_and(|position| {
+                    listing.row(position).is_some_and(|row| !row.entry.is_browsable())
+                        || listing.is_package_row(position, cx)
+                })
         };
         if on_file {
             cx.propagate();
@@ -608,6 +610,23 @@ impl Explorer {
             self.listing
                 .update(cx, |listing, cx| listing.activate_cursor(cx));
         }
+    }
+
+    /// "Show original": goes to what the link or alias under the cursor points at.
+    fn show_original(&mut self, _: &file_list::ShowOriginal, _: &mut Window, cx: &mut Context<Self>) {
+        self.listing
+            .update(cx, |listing, cx| listing.show_original_cursor(cx));
+    }
+
+    /// "Show package contents": goes inside the package under the cursor.
+    fn show_package_contents(
+        &mut self,
+        _: &file_list::ShowPackageContents,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.listing
+            .update(cx, |listing, cx| listing.open_package_cursor(cx));
     }
 
     /// Shift+Enter: opens the file under the cursor in its own app, for files of this computer.
@@ -708,12 +727,14 @@ impl Explorer {
         let rows: Vec<RowFacts> = listing
             .selected_positions(MAX_ROW_FACTS)
             .into_iter()
-            .filter_map(|position| listing.row(position))
-            .map(|row| {
+            .filter_map(|position| listing.row(position).map(|row| (position, row)))
+            .map(|(position, row)| {
                 let folder = row.entry.is_browsable();
                 RowFacts {
                     folder,
                     disk_image: is_disk_image(row.entry.name, folder),
+                    package: listing.is_package_row(position, cx),
+                    original: listing.is_link_row(position),
                 }
             })
             .collect();
@@ -937,7 +958,7 @@ impl Explorer {
                         .hover_paint
                         .and_then(|(at, amount)| (at == position).then_some(amount));
                     let under_plate = self.glide_paint.is_some_and(|(to, _)| to == position);
-                    let mut file_row = FileRow::new(&row, position, resource_column)
+                    let mut file_row = FileRow::new(&row, position, resource_column, listing.local_times())
                         .system(listing.system_of(&row))
                         .hover(hover)
                         .under_plate(under_plate);
@@ -1488,6 +1509,8 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::select_to_last))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::show_in_folder))
+            .on_action(cx.listener(Self::show_package_contents))
+            .on_action(cx.listener(Self::show_original))
             .on_action(cx.listener(Self::open_in_app))
             .on_action(cx.listener(Self::toggle_quick_look))
             .on_action(cx.listener(Self::select_all))
