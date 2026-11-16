@@ -140,6 +140,13 @@ struct Piece {
     shade: Option<Arc<[ShadeRun]>>,
     /// Where the selected file lives on the volume; only on the current volume.
     marks: Option<Arc<[MarkRun]>>,
+    /// How many volumes share the segment's bytes (the volumes of one container); 1 for most.
+    shared: usize,
+}
+
+/// The line under a segment whose bytes several volumes share: "3 volumes share this space".
+pub(crate) fn shared_note(count: usize) -> Option<String> {
+    (count > 1).then(|| format!("{count} volumes share this space"))
 }
 
 /// The pieces of `disk`, left to right. A disk that failed as a whole is one piece.
@@ -152,38 +159,37 @@ fn pieces(disk: &Disk, sources: &Sources, strip: &Strip, current: SourceId) -> V
             is_current: whole.id == current,
             shade: None,
             marks: None,
+            shared: 1,
         }];
     }
-    // (source, start, len) of each volume, in map order.
-    let volumes: Vec<(SourceId, u64, u64)> = disk
-        .volumes
-        .iter()
-        .filter_map(|&id| match sources.source(id)?.kind {
-            SourceKind::Volume { start, len, .. } => Some((id, start, len)),
-            SourceKind::Host | SourceKind::WholeDisk { .. } => None,
-        })
-        .collect();
-    let ranges: Vec<(u64, u64)> = volumes
-        .iter()
-        .map(|&(_, start, len)| (start, len))
-        .collect();
+    // Volumes sharing a partition (a container's) are one segment, named for the current one
+    // when it is among them, else for the first in sidebar order.
+    let spans = sources.spans(disk);
+    let ranges: Vec<(u64, u64)> = spans.iter().map(|span| (span.start, span.len)).collect();
     layout(disk.size, &ranges)
         .into_iter()
         .filter_map(|segment| match segment.kind {
             SegmentKind::Volume(index) => {
-                let &(id, _, full_len) = volumes.get(index)?;
+                let span = spans.get(index)?;
+                let id = span.lead(Some(current))?;
                 let name = sources.source(id)?.label.clone();
+                let is_current = span.holds(Some(current));
                 Some(Piece {
                     target: Some(id),
                     len: segment.len,
-                    label: Some((name, full_len)),
-                    is_current: id == current,
-                    shade: strip.shading(id).cloned(),
-                    marks: if id == current {
-                        strip.marks(id).cloned()
+                    label: Some((name, span.len)),
+                    is_current,
+                    // The volumes of a container share one map: whichever has loaded.
+                    shade: span
+                        .volumes
+                        .iter()
+                        .find_map(|&volume| strip.shading(volume).cloned()),
+                    marks: if is_current {
+                        strip.marks(current).cloned()
                     } else {
                         None
                     },
+                    shared: span.volumes.len(),
                 })
             }
             SegmentKind::Unallocated => Some(Piece {
@@ -193,6 +199,7 @@ fn pieces(disk: &Disk, sources: &Sources, strip: &Strip, current: SourceId) -> V
                 is_current: false,
                 shade: None,
                 marks: None,
+                shared: 0,
             }),
         })
         .collect()
@@ -318,7 +325,8 @@ impl DiskStrip {
             .flex_basis(px(0.))
             .min_w(metrics::STRIP_SEGMENT_MIN_WIDTH)
             .child(bar)
-            .child(label);
+            .child(label)
+            .children(shared_note(piece.shared).map(|note| label_line(colors).child(note)));
         // Byte counts are far larger than 1, so the factors always add up past the point where
         // flexbox would leave part of the row unfilled. Precision loss in the cast is harmless.
         column.style().flex_grow = Some(piece.len as f32);
@@ -549,6 +557,16 @@ mod tests {
 
     fn seg(kind: SegmentKind, start: u64, len: u64) -> Segment {
         Segment { kind, start, len }
+    }
+
+    #[test]
+    fn only_a_shared_segment_has_a_note() {
+        assert_eq!(shared_note(0), None);
+        assert_eq!(shared_note(1), None);
+        assert_eq!(
+            shared_note(3).as_deref(),
+            Some("3 volumes share this space")
+        );
     }
 
     #[test]

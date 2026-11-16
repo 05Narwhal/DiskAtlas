@@ -378,6 +378,7 @@ mod tests {
             kind: SourceKind::Host,
             availability: Availability::Browsable,
             system: None,
+            role: None,
         }
     }
 

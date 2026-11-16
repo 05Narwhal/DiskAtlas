@@ -33,9 +33,9 @@ use std::time::Instant;
 
 use gpui::{
     Action, AnyElement, AnyView, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle,
-    FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString,
-    Stateful, Subscription, Transformation, Window, canvas, div, prelude::*, radians, relative,
-    svg,
+    FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    SharedString, Stateful, StyledText, Subscription, Transformation, Window, canvas, div,
+    prelude::*, radians, relative, svg,
 };
 
 use crate::assets::icon;
@@ -52,6 +52,7 @@ use crate::state::order::SortSpec;
 use crate::state::properties::{PropertiesTarget, PropertiesWindows, Request};
 use crate::state::sources::{
     Availability, Disk, DiskId, Source, SourceGroup, SourceId, SourceKind, Sources, SystemKind,
+    is_quiet_role,
 };
 use crate::state::view::ViewState;
 use crate::theme::{
@@ -59,6 +60,7 @@ use crate::theme::{
     motion::{self, Disclosure, Reveal},
     scale::{Density, radius, size, space, text},
 };
+use disk_atlas_lib::fs::probe::VolumeRole;
 
 /// The groups in the order the sidebar draws them.
 const GROUP_ORDER: [SourceGroup; 3] = [
@@ -116,6 +118,13 @@ fn unsupported_reason(format: &str) -> String {
         "NTFS" => "NTFS. Disk Atlas cannot read NTFS yet; Windows can, if you mount it.".to_owned(),
         other => format!("{other}. Disk Atlas cannot read {other} yet."),
     }
+}
+
+/// The role set after a container volume's name, in `ink3`: only when the name does not already
+/// say it ("Macintosh HD - Data" needs no "Data").
+fn role_note(label: &str, role: Option<VolumeRole>) -> Option<&'static str> {
+    let name = role?.name();
+    (!label.to_lowercase().contains(&name.to_lowercase())).then_some(name)
 }
 
 /// The text of "N other partitions".
@@ -544,7 +553,12 @@ impl Sidebar {
             .gap(space::S8)
             .rounded(radius::ROW)
             .cursor_pointer()
-            .text_color(colors.ink)
+            // Preboot, Recovery and VM are rarely what anyone wants: dimmed.
+            .text_color(if is_quiet_role(source.role) {
+                colors.ink3
+            } else {
+                colors.ink
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let to = Location::root(&target);
                 this.navigation
@@ -563,14 +577,27 @@ impl Sidebar {
                     .rounded_full()
                     .bg(if is_current { colors.pin } else { colors.line }),
             )
-            .child(
-                div()
+            .child({
+                let label = div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(is_current, |label| label.font_weight(FontWeight::BOLD))
-                    .child(source.label.clone()),
-            )
+                    .when(is_current, |label| label.font_weight(FontWeight::BOLD));
+                match role_note(&source.label, source.role) {
+                    // "Macintosh HD System": the role after the name, quieter.
+                    Some(role) => {
+                        let text = format!("{} {role}", source.label);
+                        let note = source.label.len().saturating_add(1)..text.len();
+                        let quiet = HighlightStyle {
+                            color: Some(colors.ink3),
+                            font_weight: Some(FontWeight::NORMAL),
+                            ..HighlightStyle::default()
+                        };
+                        label.child(StyledText::new(text).with_highlights(vec![(note, quiet)]))
+                    }
+                    None => label.child(source.label.clone()),
+                }
+            })
             .children(detail.map(|detail| detail_text(detail, colors)));
         if is_current {
             row.bg(colors.hover)
@@ -618,7 +645,7 @@ impl Sidebar {
 
         *next_index += 1;
         let heading = self
-            .disk_heading(disk, &volumes, current, is_open, *next_index, colors, cx)
+            .disk_heading(disk, sources, current, is_open, *next_index, colors, cx)
             .into_any_element();
         // Closing, the volumes stay drawn until they have folded away.
         if !is_open && disk_fold.is_none() {
@@ -739,7 +766,7 @@ impl Sidebar {
     fn disk_heading(
         &self,
         disk: &Disk,
-        volumes: &[&Source],
+        sources: &Sources,
         current: Option<SourceId>,
         is_open: bool,
         index: usize,
@@ -747,14 +774,11 @@ impl Sidebar {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let id = disk.id;
-        let parts: Vec<(u64, u64, bool)> = volumes
+        // One part per partition: the volumes of a container share theirs.
+        let parts: Vec<(u64, u64, bool)> = sources
+            .spans(disk)
             .iter()
-            .filter_map(|source| match source.kind {
-                SourceKind::Volume { start, len, .. } => {
-                    Some((start, len, Some(source.id) == current))
-                }
-                _ => None,
-            })
+            .map(|span| (span.start, span.len, span.holds(current)))
             .collect();
         let (hover, pressed) = (colors.hover, colors.field);
         let showing = self.view.read(cx).disk() == Some(id);
@@ -1285,6 +1309,20 @@ mod tests {
             placement(None, &unsupported("Unknown")),
             Placement::Other("Disk Atlas does not recognise what is stored here.".into())
         );
+    }
+
+    #[test]
+    fn the_role_follows_a_name_that_does_not_say_it() {
+        assert_eq!(
+            role_note("Macintosh HD", Some(VolumeRole::System)),
+            Some("System")
+        );
+        assert_eq!(
+            role_note("Macintosh HD - Data", Some(VolumeRole::Data)),
+            None
+        );
+        assert_eq!(role_note("RECOVERY", Some(VolumeRole::Recovery)), None);
+        assert_eq!(role_note("Backups", None), None);
     }
 
     #[test]

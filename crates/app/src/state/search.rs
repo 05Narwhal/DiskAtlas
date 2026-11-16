@@ -1051,6 +1051,7 @@ mod tests {
             },
             availability: Availability::Browsable,
             system: None,
+            role: None,
         }
     }
 

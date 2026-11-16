@@ -29,7 +29,10 @@ use std::sync::Arc;
 
 use disk_atlas_lib::error::{Error, Result as EngineResult};
 use disk_atlas_lib::fs::native::{self, NativeFs};
-use disk_atlas_lib::fs::probe::{Content, Mount, mount as mount_content, probe as probe_content};
+use disk_atlas_lib::fs::probe::{
+    ContainerVolume, Content, Mount, VolumeRole, VolumeState, mount as mount_content,
+    probe as probe_content,
+};
 use disk_atlas_lib::fs::{DirStream, FileSystem, Metadata, NodeId, VolumeInfo};
 use disk_atlas_lib::image;
 use disk_atlas_lib::io::block::{BlockSource, Slice};
@@ -237,6 +240,71 @@ pub struct Source {
     pub availability: Availability,
     /// Set for a partition the computer needs rather than a person (EFI, boot, reserved).
     pub system: Option<SystemKind>,
+    /// What a volume of a container (APFS) is for, when the container says. The sidebar orders
+    /// and dims by it; it never decides what can be read.
+    pub role: Option<VolumeRole>,
+}
+
+/// Where a volume of a container goes among its siblings: Data and volumes without a role first,
+/// then System, then Preboot, Recovery and VM (design/m7-apfs.md §8).
+pub fn role_rank(role: Option<VolumeRole>) -> u8 {
+    match role {
+        Some(VolumeRole::System) => 1,
+        Some(VolumeRole::Preboot) => 2,
+        Some(VolumeRole::Recovery) => 3,
+        Some(VolumeRole::Vm) => 4,
+        // `VolumeRole` is non-exhaustive: a role the app does not know yet is listed like Data.
+        None | Some(VolumeRole::Data | _) => 0,
+    }
+}
+
+/// True for the roles the sidebar dims, because they are rarely what anyone wants: Preboot,
+/// Recovery and VM.
+pub fn is_quiet_role(role: Option<VolumeRole>) -> bool {
+    role_rank(role) >= 2
+}
+
+/// The volumes of one disk that lie on the same bytes: the volumes of one container, or a volume
+/// alone in its partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    /// Byte offset on the disk.
+    pub start: u64,
+    /// Length in bytes.
+    pub len: u64,
+    /// The volumes, in sidebar order. Never empty.
+    pub volumes: Vec<SourceId>,
+}
+
+impl Span {
+    /// The volume that stands for the span: `current` when it is one of them, else the first.
+    pub fn lead(&self, current: Option<SourceId>) -> Option<SourceId> {
+        current
+            .filter(|id| self.volumes.contains(id))
+            .or_else(|| self.volumes.first().copied())
+    }
+
+    /// True when `id` is one of the span's volumes.
+    pub fn holds(&self, id: Option<SourceId>) -> bool {
+        id.is_some_and(|id| self.volumes.contains(&id))
+    }
+}
+
+/// Groups `(source, start, len)` volumes, in disk order, into spans: neighbours on the same bytes
+/// are one span. The volumes of a container are added next to each other, so they meet here.
+fn group_spans(volumes: &[(SourceId, u64, u64)]) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::with_capacity(volumes.len());
+    for &(id, start, len) in volumes {
+        match spans.last_mut() {
+            Some(span) if span.start == start && span.len == len => span.volumes.push(id),
+            _ => spans.push(Span {
+                start,
+                len,
+                volumes: vec![id],
+            }),
+        }
+    }
+    spans
 }
 
 /// A physical disk or an opened disk image, and the sources it holds.
@@ -337,18 +405,26 @@ struct PreparedVolume {
     /// `None` unless `availability` is [`Availability::Browsable`].
     fs: Option<Arc<dyn FileSystem>>,
     availability: Availability,
+    /// What the volume is for, when it is one of a container's.
+    role: Option<VolumeRole>,
+}
+
+/// The words for a volume that failed to mount.
+fn mount_failure(error: &Error) -> Availability {
+    Availability::Failed(format!("This volume could not be read ({error}).").into())
 }
 
 /// Mounts the volume `plan` describes when a reader exists for its format. A mounted volume
-/// takes the volume's own name when it has one. Blocking.
-fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> PreparedVolume {
+/// takes the volume's own name when it has one. A container gives one volume per volume in it,
+/// all on the partition's bytes, in sidebar order. Blocking.
+fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Vec<PreparedVolume> {
     let volume = if plan.start == 0 && plan.len == source.len() {
         Ok(Arc::clone(source))
     } else {
         Slice::new(Arc::clone(source), plan.start, plan.len)
             .map(|slice| Arc::new(slice) as Arc<dyn BlockSource>)
     };
-    match volume.and_then(|volume| mount_content(volume, plan.content)) {
+    let one = match volume.and_then(|volume| mount_content(volume, plan.content)) {
         Ok(Some(Mount::Volume(fs))) => {
             let name = fs.info().name;
             if !name.trim().is_empty() {
@@ -358,25 +434,76 @@ fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Prepared
                 plan,
                 fs: Some(fs),
                 availability: Availability::Browsable,
+                role: None,
             }
         }
-        // A container's volumes become one source each in M7 (design/m7-apfs.md §8); no reader
-        // returns one before then. `Mount` is non-exhaustive, hence the wildcard.
+        Ok(Some(Mount::Container(volumes))) => return container_volumes(&plan, volumes),
+        // `Mount` is non-exhaustive, hence the wildcard.
         Ok(None | Some(_)) => PreparedVolume {
             availability: Availability::Unsupported {
                 format: SharedString::from(plan.format),
             },
             plan,
             fs: None,
+            role: None,
         },
         Err(error) => PreparedVolume {
-            availability: Availability::Failed(
-                format!("This volume could not be read ({error}).").into(),
-            ),
+            availability: mount_failure(&error),
             plan,
             fs: None,
+            role: None,
         },
+    };
+    vec![one]
+}
+
+/// The volumes of a container on the partition `plan` describes, Data first (see [`role_rank`]).
+/// A volume without a name takes the partition's label. An empty container is one failed entry,
+/// so the partition does not vanish from the sidebar.
+fn container_volumes(plan: &VolumePlan, volumes: Vec<ContainerVolume>) -> Vec<PreparedVolume> {
+    if volumes.is_empty() {
+        return vec![PreparedVolume {
+            plan: plan.clone(),
+            fs: None,
+            availability: Availability::Failed("This container holds no volumes.".into()),
+            role: None,
+        }];
     }
+    let mut prepared: Vec<PreparedVolume> = volumes
+        .into_iter()
+        .map(|volume| {
+            let mut plan = plan.clone();
+            let name = volume.name.trim();
+            if !name.is_empty() {
+                plan.label = name.to_owned();
+            }
+            let (fs, availability) = match volume.state {
+                VolumeState::Ready(fs) => (Some(fs), Availability::Browsable),
+                // The unlock screen is M7 task 14; until then a locked volume says what it is.
+                VolumeState::Locked(_) => (
+                    None,
+                    Availability::Failed(
+                        "This volume is encrypted. Disk Atlas cannot unlock it yet.".into(),
+                    ),
+                ),
+                VolumeState::Failed(error) => (None, mount_failure(&error)),
+                // `VolumeState` is non-exhaustive.
+                _ => (
+                    None,
+                    Availability::Failed("This volume cannot be read yet.".into()),
+                ),
+            };
+            PreparedVolume {
+                plan,
+                fs,
+                availability,
+                role: volume.role,
+            }
+        })
+        .collect();
+    // Stable: volumes of one rank keep the container's order.
+    prepared.sort_by_key(|volume| role_rank(volume.role));
+    prepared
 }
 
 /// What a disk's bytes say it holds.
@@ -513,7 +640,7 @@ fn prepare(found: Found, opened: Result<Arc<dyn BlockSource>, Availability>) -> 
                 volumes: layout
                     .volumes
                     .into_iter()
-                    .map(|plan| mount_volume(&source, plan))
+                    .flat_map(|plan| mount_volume(&source, plan))
                     .collect(),
                 whole: layout.failure,
             }
@@ -744,6 +871,20 @@ impl Sources {
         self.disks.iter().find(|disk| disk.id == id)
     }
 
+    /// The volumes of `disk` by the bytes they lie on, in map order: the volumes of a container
+    /// are one span. Empty for a disk that failed as a whole.
+    pub fn spans(&self, disk: &Disk) -> Vec<Span> {
+        let volumes: Vec<(SourceId, u64, u64)> = disk
+            .volumes
+            .iter()
+            .filter_map(|&id| match self.source(id)?.kind {
+                SourceKind::Volume { start, len, .. } => Some((id, start, len)),
+                SourceKind::Host | SourceKind::WholeDisk { .. } => None,
+            })
+            .collect();
+        group_spans(&volumes)
+    }
+
     /// Adds the host folder `path` as a source, as the startup tasks do for a drive. For the
     /// tests of the host's live sizes, which need a source whose root they own.
     #[cfg(test)]
@@ -866,6 +1007,7 @@ impl Sources {
             plan,
             fs,
             availability,
+            role,
         } in volumes
         {
             let id = self.next_source_id();
@@ -883,6 +1025,7 @@ impl Sources {
                 },
                 availability,
                 system: plan.system,
+                role,
             });
         }
         let whole = whole.map(|availability| {
@@ -896,6 +1039,7 @@ impl Sources {
                 kind: SourceKind::WholeDisk { disk },
                 availability,
                 system: None,
+                role: None,
             });
             id
         });
@@ -935,6 +1079,7 @@ impl Sources {
                 kind: SourceKind::Host,
                 availability: Availability::Browsable,
                 system: None,
+                role: None,
             });
         }
         if self.items.len() != before {
@@ -1363,6 +1508,126 @@ mod tests {
             text.starts_with("This volume could not be read ("),
             "{text}"
         );
+    }
+
+    fn apfs_plan() -> VolumePlan {
+        VolumePlan {
+            label: "Container disk2".into(),
+            start: 4096,
+            len: 1 << 30,
+            format: "APFS",
+            content: Content::Apfs,
+            system: None,
+        }
+    }
+
+    #[test]
+    fn a_container_gives_one_volume_each_data_first() {
+        let ready = |name: &str, role| {
+            ContainerVolume::new(name, role, VolumeState::Ready(Unavailable::arc(name)))
+        };
+        let volumes = vec![
+            ready("Macintosh HD", Some(VolumeRole::System)),
+            ready("Preboot", Some(VolumeRole::Preboot)),
+            ready("Macintosh HD - Data", Some(VolumeRole::Data)),
+            ContainerVolume::new(
+                "VM",
+                Some(VolumeRole::Vm),
+                VolumeState::Failed(Error::unsupported("encrypted volume")),
+            ),
+            ready("  ", None),
+        ];
+        let prepared = container_volumes(&apfs_plan(), volumes);
+        let rows: Vec<_> = prepared
+            .iter()
+            .map(|v| (v.plan.label.as_str(), v.role, v.availability.is_browsable()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Macintosh HD - Data", Some(VolumeRole::Data), true),
+                // No name: the partition's label.
+                ("Container disk2", None, true),
+                ("Macintosh HD", Some(VolumeRole::System), true),
+                ("Preboot", Some(VolumeRole::Preboot), true),
+                ("VM", Some(VolumeRole::Vm), false),
+            ]
+        );
+        // Every volume lies on the partition's bytes and keeps its format.
+        assert!(
+            prepared
+                .iter()
+                .all(|v| v.plan.start == 4096 && v.plan.len == 1 << 30 && v.plan.format == "APFS")
+        );
+        assert!(prepared[..4].iter().all(|v| v.fs.is_some()));
+        let Availability::Failed(text) = &prepared[4].availability else {
+            panic!("expected a failure");
+        };
+        assert!(
+            text.starts_with("This volume could not be read ("),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_container_stays_listed_as_a_failure() {
+        let prepared = container_volumes(&apfs_plan(), Vec::new());
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].plan, apfs_plan());
+        assert_eq!(
+            prepared[0].availability,
+            Availability::Failed("This container holds no volumes.".into())
+        );
+    }
+
+    #[test]
+    fn quiet_roles_are_preboot_recovery_and_vm() {
+        assert!(!is_quiet_role(None));
+        assert!(!is_quiet_role(Some(VolumeRole::Data)));
+        assert!(!is_quiet_role(Some(VolumeRole::System)));
+        assert!(is_quiet_role(Some(VolumeRole::Preboot)));
+        assert!(is_quiet_role(Some(VolumeRole::Recovery)));
+        assert!(is_quiet_role(Some(VolumeRole::Vm)));
+    }
+
+    #[test]
+    fn volumes_on_the_same_bytes_are_one_span() {
+        let id = SourceId::for_test;
+        let spans = group_spans(&[
+            (id(0), 0, 100),
+            (id(1), 100, 900),
+            (id(2), 100, 900),
+            (id(3), 100, 900),
+            (id(4), 1000, 50),
+        ]);
+        assert_eq!(
+            spans,
+            vec![
+                Span {
+                    start: 0,
+                    len: 100,
+                    volumes: vec![id(0)]
+                },
+                Span {
+                    start: 100,
+                    len: 900,
+                    volumes: vec![id(1), id(2), id(3)]
+                },
+                Span {
+                    start: 1000,
+                    len: 50,
+                    volumes: vec![id(4)]
+                },
+            ]
+        );
+        let shared = &spans[1];
+        // The current volume leads its span; otherwise the first in sidebar order.
+        assert_eq!(shared.lead(Some(id(3))), Some(id(3)));
+        assert_eq!(shared.lead(Some(id(0))), Some(id(1)));
+        assert_eq!(shared.lead(None), Some(id(1)));
+        assert!(shared.holds(Some(id(2))));
+        assert!(!shared.holds(Some(id(4))) && !shared.holds(None));
+        assert!(group_spans(&[]).is_empty());
     }
 
     #[test]
