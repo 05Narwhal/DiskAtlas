@@ -44,10 +44,6 @@ use crate::keymap::{self, AUX_WINDOW};
 use crate::state::settings::{SettingValue, Settings};
 use crate::theme::{Colors, Theme, fonts, metrics, scale::text};
 
-// TODO(R5-platform): keep on top. Windows needs `SetWindowPos(hwnd, HWND_TOPMOST, ..)` (one
-// `unsafe` call through `windows-sys`), macOS `[window setLevel: NSFloatingWindowLevel]` through
-// `objc`; Julian must approve both. Linux hides the toggle (X11 needs `_NET_WM_STATE_ABOVE`,
-// Wayland forbids it). `r1-redesign.md` 6.
 // TODO(R5-platform): Linux has not been run. With server-side decorations the system draws a
 // bar of its own above ours; the design for that case is not written.
 

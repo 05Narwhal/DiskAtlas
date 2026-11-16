@@ -421,7 +421,7 @@ pub static SETTINGS: &[SettingDef] = &[
     SettingDef {
         platforms: Platforms {
             windows: true,
-            macos: true,
+            macos: false,
             linux: false,
         },
         ..boolean(

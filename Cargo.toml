@@ -66,6 +66,10 @@ sha2 = "0.10"
 # GPL-3.0-or-later on 2026-11-15.
 trash = "5"
 
+# The window handle GPUI hands out, for keep on top on Windows. Approved by Julian on 2026-11-16.
+# MIT OR Apache-2.0, already in the lock file through GPUI.
+raw-window-handle = "0.6"
+
 # Picture thumbnails (R6): decoding and shrinking pictures before they are cached. Approved by
 # Julian on 2026-11-15. MIT OR Apache-2.0, already in the lock file through GPUI (the 0.25 line
 # GPUI uses); only the decoders the preview providers recognise.

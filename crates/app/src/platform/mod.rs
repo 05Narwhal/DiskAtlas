@@ -16,4 +16,5 @@
 //! Small questions to the operating system that GPUI 0.2.2 does not answer. Each is blocking and
 //! runs on the background executor.
 
+pub mod keep_on_top;
 pub mod reduced_motion;

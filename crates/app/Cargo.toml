@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+raw-window-handle.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

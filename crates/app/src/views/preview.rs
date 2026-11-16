@@ -45,10 +45,12 @@ use crate::assets::icon;
 use crate::components::details::display_line;
 use crate::format;
 use crate::keymap::{self, QUICK_LOOK, QUICK_LOOK_BUTTON, controls, quick_look as actions};
+use crate::platform::keep_on_top;
 use crate::preview::{ImagePreview, MAX_TEXT_BYTES, Preview, TextPreview};
 use crate::state::facts::{DetailRow, kind_text, tab_rows};
 use crate::state::listing::Motion;
 use crate::state::quick_look::{LoadState, QuickLook, Tab, tab_after_fork_switch};
+use crate::state::settings::Settings;
 use crate::theme::{
     Colors, Glyph, Theme, fonts, metrics, motion,
     scale::{radius, size, space, text},
@@ -141,6 +143,8 @@ pub struct QuickLookPanel {
     fork_focus: [FocusHandle; 2],
     close_focus: FocusHandle,
     fullscreen_focus: FocusHandle,
+    /// The keep-on-top state last given to the window.
+    on_top: bool,
     text_scroll: UniformListScrollHandle,
     details_scroll: UniformListScrollHandle,
     /// The text list's widest row, with the generation it was found for.
@@ -161,6 +165,8 @@ impl QuickLookPanel {
     /// The panel over `quick_look`. It draws nothing while that is closed.
     pub fn new(quick_look: Entity<QuickLook>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&quick_look, |_, _, cx| cx.notify());
+        // A change of the keep-on-top setting reaches the window at its next frame.
+        cx.observe_global::<Settings>(|_, cx| cx.notify()).detach();
         let reduced_motion = motion::reduced(cx);
         let bytes = cx.new(|cx| BytesView::new(quick_look.clone(), cx));
         Self {
@@ -170,6 +176,7 @@ impl QuickLookPanel {
             fork_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             close_focus: cx.focus_handle().tab_stop(true),
             fullscreen_focus: cx.focus_handle().tab_stop(true),
+            on_top: false,
             text_scroll: UniformListScrollHandle::new(),
             details_scroll: UniformListScrollHandle::new(),
             widest: None,
@@ -795,7 +802,12 @@ impl Focusable for QuickLookPanel {
 }
 
 impl Render for QuickLookPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let want_on_top = Settings::get(cx).bool_of("ql_keep_on_top");
+        if want_on_top != self.on_top {
+            self.on_top = want_on_top;
+            keep_on_top::set(window, want_on_top);
+        }
         let quick_look = self.quick_look.read(cx);
         if !quick_look.is_open() {
             // The window is closing.
