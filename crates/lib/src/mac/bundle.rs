@@ -69,9 +69,66 @@ pub fn package_kind(name: &str) -> &'static str {
     extension_matches(name).unwrap_or("Package")
 }
 
+/// Largest `Info.plist` read. A bigger one is refused, not truncated.
+pub const MAX_INFO_PLIST: usize = 1 << 20;
+
+/// The icon file a package names in its `Info.plist` (`CFBundleIconFile`), as the name of a
+/// file in `Contents/Resources`, with `.icns` added when it has no extension. `None` when the
+/// plist is too big, unreadable, names no icon, or names one that is not a plain file name
+/// (a path separator, `..`, a NUL or a control character).
+pub fn icon_file_name(info_plist: &[u8]) -> Option<String> {
+    if info_plist.len() > MAX_INFO_PLIST {
+        return None;
+    }
+    let value = super::bplist::parse_any(info_plist).ok()?;
+    let name = value.get("CFBundleIconFile")?.as_str()?.trim();
+    if name.is_empty()
+        || name.len() > 255
+        || name == ".."
+        || name.contains("..")
+        || name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+    {
+        return None;
+    }
+    Some(if name.contains('.') {
+        name.to_owned()
+    } else {
+        format!("{name}.icns")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plist(icon: &str) -> Vec<u8> {
+        format!(
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIconFile</key>             <string>{icon}</string></dict></plist>"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn the_icon_name_gets_its_extension_and_unsafe_names_are_refused() {
+        assert_eq!(icon_file_name(&plist("App")).as_deref(), Some("App.icns"));
+        assert_eq!(
+            icon_file_name(&plist("App.icns")).as_deref(),
+            Some("App.icns")
+        );
+        for bad in ["../x", "a/b", "a\\b", "..", "", "C:x"] {
+            assert_eq!(icon_file_name(&plist(bad)), None, "{bad}");
+        }
+        assert_eq!(icon_file_name(b"not a plist"), None);
+    }
+
+    #[test]
+    fn a_two_mebibyte_plist_is_refused() {
+        let mut big = plist("App");
+        big.resize(2 << 20, b' ');
+        assert_eq!(icon_file_name(&big), None);
+    }
 
     #[test]
     fn every_listed_extension_and_the_bundle_bit_make_a_package() {

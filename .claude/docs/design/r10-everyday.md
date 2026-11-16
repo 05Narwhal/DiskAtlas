@@ -927,7 +927,6 @@ Keys already in M8 §8.1 are marked ·. "→" names where the behaviour is desig
 | `merge_sidecars` | switch | on | Treat a ._ file as part of the file it belongs to → §5.2 |
 | `packages_as_folders` | switch | off | Show applications and other packages as folders → §5.4 |
 | `finder_views` | switch | off | Open each folder in the view and order the Finder last used → §5.2 |
-| `finder_layout` | Disk images · Always · Never | disk images | Lay icons out where the Finder had them → §5.5 |
 | `columns` | (set from the column header's menu) | Modified, Size, Kind | |
 | `details_pane` ·, `sidebar` · | (set from the window) | on | |
 
@@ -1217,3 +1216,7 @@ Not changed, and looked at: the kinds table against R1's twelve tints (they matc
 - **R17.5:** `mac::original::resolve` does the walk. An alias is found by its path first and by its file number second (the folder is then known by number only and is called "Original's folder"). Version 3 and bookmark records say "This alias uses a newer format".
 - **R17.6:** `ds_store::read_store(fs, dir)`; the S half is only the comment in Properties. `finder_views` and "Was in" for Mac trashes are not built. The reader was written from the notes and tested on files made by the test builder only.
 
+2026-11-16, lane A:
+
+- **R17.7:** custom icons go through the thumbnail pipeline (`state/thumbnails.rs`, `Origin`): a folder's `Icon\r` (looked up by name; no custom-icon flag is read, so every visible folder costs one failed lookup on the background executor, cached as absent), a package's `CFBundleIconFile` (`mac::bundle::icon_file_name`, plist over 1 MiB or a name with a separator or `..` is refused) A volume's `.VolumeIcon.icns` is not built: the sidebar draws no icons yet, so it waits for that design. A failure keeps the kind's glyph without a message.
+- **R17.8:** dropped as decision 35 allows; `finder_layout` is removed from the settings table (§ settings above and `state/settings.rs`).

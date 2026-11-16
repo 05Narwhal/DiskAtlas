@@ -21,8 +21,10 @@
 //! entries and [`THUMB_BYTES`] bytes, least recently used out first. A file that cannot be
 //! shown (damaged, too large, not a picture after all) is remembered and not tried again.
 //!
-//! Only plain pictures are done here. Other kinds keep their glyph; custom icons (R17b), PDF,
-//! fonts and 3D models are later work on the same pipeline.
+//! Pictures and custom icons are done here (R17b): a folder's `Icon\r` and a package's
+//! `CFBundleIconFile`. A volume's `.VolumeIcon.icns` waits for icons in the sidebar. A custom icon that cannot be read or
+//! decoded is remembered as absent and the row keeps its kind's glyph, without a message. Other
+//! kinds keep their glyph; PDF, fonts and 3D models are later work on the same pipeline.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -30,6 +32,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use disk_atlas_lib::fs::{FileSystem, NodeId, NodeKind, Stream};
+use disk_atlas_lib::mac::bundle;
+use disk_atlas_lib::mac::icns::{Icns, IconImage, MAX_ICNS};
 use gpui::{Context, RenderImage, SharedString, Task};
 use image::{DynamicImage, Frame, ImageFormat, ImageReader, Limits, imageops::FilterType};
 
@@ -60,12 +64,25 @@ pub struct Key {
     pub modified: Option<i64>,
 }
 
+/// Where a thumbnail comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Origin {
+    /// The file is a picture.
+    #[default]
+    Picture,
+    /// A folder's own icon: the `icns` resource of its `Icon\r` file.
+    FolderIcon,
+    /// A package's icon: `CFBundleIconFile` of `Contents/Info.plist`.
+    PackageIcon,
+}
+
 /// One file the views want a thumbnail of.
 #[derive(Clone)]
 pub struct Want {
     pub key: Key,
     pub fs: Arc<dyn FileSystem>,
     pub name: SharedString,
+    pub origin: Origin,
 }
 
 /// The longest side to make for a tile or glyph box `side` pixels across.
@@ -251,12 +268,71 @@ impl Thumbnails {
 
 /// Reads, decodes and shrinks one picture. Blocking; `None` for anything that cannot be shown.
 fn make(want: &Want) -> Option<(Arc<RenderImage>, u64)> {
+    if want.origin != Origin::Picture {
+        let icns = custom_icns(want)?;
+        let edge = want.key.edge;
+        let small = match icns.best(edge)? {
+            IconImage::Png(bytes) => shrink(&bytes, ImageFormat::Png, edge)?,
+            IconImage::Rgba(rgba) => {
+                let image = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.pixels)?;
+                if image.width() > edge || image.height() > edge {
+                    DynamicImage::ImageRgba8(image)
+                        .resize(edge, edge, FilterType::Triangle)
+                        .into_rgba8()
+                } else {
+                    image
+                }
+            }
+        };
+        return render_image(small);
+    }
     let format = format_of(want.name.rsplit_once('.')?.1)?;
     let source = want.fs.open(want.key.node, Stream::Data).ok()?;
     let never = AtomicBool::new(false);
     let limit = usize::try_from(MAX_IMAGE_FILE).ok()?;
     let bytes = read_prefix(source.as_ref(), limit, &never).ok()??;
     let small = shrink(&bytes, format, want.key.edge)?;
+    render_image(small)
+}
+
+/// The icon file of a custom-icon `want`, parsed. Blocking; `None` for anything missing,
+/// unreadable or damaged.
+fn custom_icns(want: &Want) -> Option<Icns> {
+    let fs = want.fs.as_ref();
+    let never = AtomicBool::new(false);
+    let node = want.key.node;
+    match want.origin {
+        Origin::Picture => None,
+        Origin::FolderIcon => {
+            let icon = fs.lookup(node, "Icon\r").ok()??;
+            let fork = fs.open(icon, Stream::Resource).ok()?;
+            Icns::from_resource_fork(fork.as_ref()).ok()?
+        }
+        Origin::PackageIcon => {
+            let contents = fs.lookup(node, "Contents").ok()??;
+            let plist = fs.lookup(contents, "Info.plist").ok()??;
+            let source = fs.open(plist, Stream::Data).ok()?;
+            // One byte over the limit is read, so that a bigger file is refused, not cut.
+            let bytes = read_prefix(source.as_ref(), bundle::MAX_INFO_PLIST + 1, &never).ok()??;
+            let name = bundle::icon_file_name(&bytes)?;
+            let resources = fs.lookup(contents, "Resources").ok()??;
+            let file = fs.lookup(resources, &name).ok()??;
+            read_icns(fs, file, &never)
+        }
+    }
+}
+
+fn read_icns(fs: &dyn FileSystem, file: NodeId, never: &AtomicBool) -> Option<Icns> {
+    let source = fs.open(file, Stream::Data).ok()?;
+    if source.len() > MAX_ICNS as u64 {
+        return None;
+    }
+    let bytes = read_prefix(source.as_ref(), MAX_ICNS, never).ok()??;
+    Icns::parse(&bytes).ok()
+}
+
+/// Turns a shrunk picture into the texture GPUI draws, and its cost in bytes.
+fn render_image(small: image::RgbaImage) -> Option<(Arc<RenderImage>, u64)> {
     let (width, height) = (small.width(), small.height());
     let mut pixels = small.into_raw();
     // GPUI draws BGRA.
@@ -332,6 +408,138 @@ mod tests {
         assert!(!eligible("huge.png", file, Some(MAX_IMAGE_FILE + 1)));
         assert!(!eligible("folder.png", NodeKind::Directory, Some(10)));
         assert!(!eligible("unknown-size.png", file, None));
+    }
+
+    mod custom {
+        use super::*;
+        use disk_atlas_lib::error::{Error, Result};
+        use disk_atlas_lib::fs::native::NativeFs;
+        use disk_atlas_lib::fs::{DirStream, Metadata, VolumeInfo};
+        use disk_atlas_lib::io::block::{BlockSource, check_range};
+
+        struct Bytes(Vec<u8>);
+
+        impl BlockSource for Bytes {
+            fn len(&self) -> u64 {
+                self.0.len() as u64
+            }
+            fn sector_size(&self) -> u32 {
+                512
+            }
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+                check_range(offset, buf.len(), self.len())?;
+                let start = offset as usize;
+                buf.copy_from_slice(&self.0[start..start + buf.len()]);
+                Ok(())
+            }
+        }
+
+        /// Folders by name, files by node.
+        #[derive(Default)]
+        struct Tree {
+            names: HashMap<(u64, String), u64>,
+            files: HashMap<u64, Vec<u8>>,
+        }
+
+        impl Tree {
+            fn add(&mut self, parent: u64, name: &str, node: u64, data: Option<Vec<u8>>) {
+                self.names.insert((parent, name.to_owned()), node);
+                if let Some(data) = data {
+                    self.files.insert(node, data);
+                }
+            }
+        }
+
+        impl FileSystem for Tree {
+            fn info(&self) -> VolumeInfo {
+                NativeFs::new(std::env::temp_dir(), "test")
+                    .expect("temp dir opens")
+                    .info()
+            }
+            fn root(&self) -> NodeId {
+                NodeId(1)
+            }
+            fn metadata(&self, node: NodeId) -> Result<Metadata> {
+                Err(Error::NotFound { node: node.0 })
+            }
+            fn lookup(&self, dir: NodeId, name: &str) -> Result<Option<NodeId>> {
+                Ok(self
+                    .names
+                    .get(&(dir.0, name.to_owned()))
+                    .map(|n| NodeId(*n)))
+            }
+            fn read_dir(&self, dir: NodeId) -> Result<Box<dyn DirStream>> {
+                Err(Error::NotADirectory { node: dir.0 })
+            }
+            fn open(&self, node: NodeId, _stream: Stream) -> Result<Arc<dyn BlockSource>> {
+                match self.files.get(&node.0) {
+                    Some(data) => Ok(Arc::new(Bytes(data.clone()))),
+                    None => Err(Error::NotFound { node: node.0 }),
+                }
+            }
+        }
+
+        fn icns() -> Vec<u8> {
+            let png = png(32, 32);
+            let mut body = b"ic08".to_vec();
+            body.extend_from_slice(&(png.len() as u32 + 8).to_be_bytes());
+            body.extend(png);
+            let mut out = b"icns".to_vec();
+            out.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
+            out.extend(body);
+            out
+        }
+
+        fn plist(icon: &str) -> Vec<u8> {
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIconFile</key>                 <string>{icon}</string></dict></plist>"
+            )
+            .into_bytes()
+        }
+
+        /// A package at node 10 with its plist and an icon `App.icns`.
+        fn package(info: Vec<u8>) -> Want {
+            let mut tree = Tree::default();
+            tree.add(10, "Contents", 11, None);
+            tree.add(11, "Info.plist", 12, Some(info));
+            tree.add(11, "Resources", 13, None);
+            tree.add(13, "App.icns", 14, Some(icns()));
+            Want {
+                key: Key {
+                    source: SourceId::for_test(1),
+                    node: NodeId(10),
+                    edge: 64,
+                    modified: None,
+                },
+                fs: Arc::new(tree),
+                name: SharedString::from("Thing.app"),
+                origin: Origin::PackageIcon,
+            }
+        }
+
+        #[test]
+        fn a_package_icon_is_found_through_its_info_plist() {
+            let (_, cost) = make(&package(plist("App"))).expect("icon is made");
+            assert_eq!(cost, 32 * 32 * 4);
+        }
+
+        #[test]
+        fn a_bad_plist_or_icon_name_gives_the_glyph() {
+            assert!(make(&package(plist("Other"))).is_none());
+            assert!(make(&package(plist("../App"))).is_none());
+            assert!(make(&package(plist("Resources/App"))).is_none());
+            let mut big = plist("App");
+            big.resize(2 << 20, b' ');
+            assert!(make(&package(big)).is_none());
+            assert!(make(&package(b"junk".to_vec())).is_none());
+        }
+
+        #[test]
+        fn a_folder_without_an_icon_file_gives_the_glyph() {
+            let mut want = package(plist("App"));
+            want.origin = Origin::FolderIcon;
+            assert!(make(&want).is_none());
+        }
     }
 
     #[test]

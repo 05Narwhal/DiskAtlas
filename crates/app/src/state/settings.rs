@@ -321,18 +321,6 @@ pub static SETTINGS: &[SettingDef] = &[
         "Open each folder in the view and order the Finder last used",
         false,
     ),
-    choice(
-        "finder_layout",
-        Section::Browsing,
-        "Use the Finder's icon places",
-        "Lay icons out where the Finder had them",
-        &[
-            ("disk_images", "Disk images"),
-            ("always", "Always"),
-            ("never", "Never"),
-        ],
-        "disk_images",
-    ),
     hidden("columns", Section::Browsing),
     boolean(
         "details_pane",

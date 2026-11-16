@@ -24,7 +24,8 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use disk_atlas_lib::fs::NodeId;
+use disk_atlas_lib::fs::{NodeId, NodeKind};
+use disk_atlas_lib::mac::bundle;
 use disk_atlas_lib::search::match_ranges;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
@@ -56,7 +57,7 @@ use crate::state::order::{SortColumn, SortSpec};
 use crate::state::rename::RenameEdit;
 use crate::state::search::{Search, SearchEvent};
 use crate::state::sources::{Availability, SourceId};
-use crate::state::thumbnails::{self, Key, Thumbnails, Want};
+use crate::state::thumbnails::{self, Key, Origin, Thumbnails, Want};
 use crate::state::view::{ViewEvent, ViewMode, ViewState};
 use crate::theme::{
     Colors, Theme, metrics,
@@ -338,9 +339,20 @@ fn thumbnail_of(
     wants: &mut Vec<Want>,
 ) -> Option<std::sync::Arc<gpui::RenderImage>> {
     let entry = &row.entry;
-    if listing.in_results() || !thumbnails::eligible(entry.name, entry.kind, entry.size) {
+    if listing.in_results() {
         return None;
     }
+    let origin = if thumbnails::eligible(entry.name, entry.kind, entry.size) {
+        Origin::Picture
+    } else if entry.kind == NodeKind::Directory {
+        if bundle::is_package(entry.name, entry.kind, entry.flags) {
+            Origin::PackageIcon
+        } else {
+            Origin::FolderIcon
+        }
+    } else {
+        return None;
+    };
     let location = listing.location()?;
     let key = Key {
         source: location.source(),
@@ -348,20 +360,13 @@ fn thumbnail_of(
         edge,
         modified: entry.modified.map(|time| time.unix_nanos()),
     };
-    if let Some(image) = thumbnails.image(&key) {
-        wants.push(Want {
-            key,
-            fs: std::sync::Arc::clone(location.fs()),
-            name: SharedString::from(entry.name.to_owned()),
-        });
-        return Some(image);
-    }
     wants.push(Want {
         key,
         fs: std::sync::Arc::clone(location.fs()),
         name: SharedString::from(entry.name.to_owned()),
+        origin,
     });
-    None
+    thumbnails.image(&key)
 }
 
 fn row_text(listing: &Listing, position: usize, kind: CopyKind, cx: &App) -> Option<String> {
@@ -812,12 +817,12 @@ impl Explorer {
     fn open(&mut self, _: &file_list::Open, _: &mut Window, cx: &mut Context<Self>) {
         let on_file = {
             let listing = self.listing.read(cx);
-            listing
-                .cursor()
-                .is_some_and(|position| {
-                    listing.row(position).is_some_and(|row| !row.entry.is_browsable())
-                        || listing.is_package_row(position, cx)
-                })
+            listing.cursor().is_some_and(|position| {
+                listing
+                    .row(position)
+                    .is_some_and(|row| !row.entry.is_browsable())
+                    || listing.is_package_row(position, cx)
+            })
         };
         if on_file {
             cx.propagate();
@@ -842,7 +847,12 @@ impl Explorer {
     }
 
     /// "Show original": goes to what the link or alias under the cursor points at.
-    fn show_original(&mut self, _: &file_list::ShowOriginal, _: &mut Window, cx: &mut Context<Self>) {
+    fn show_original(
+        &mut self,
+        _: &file_list::ShowOriginal,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.listing
             .update(cx, |listing, cx| listing.show_original_cursor(cx));
     }
@@ -1209,12 +1219,13 @@ impl Explorer {
                         .hover_paint
                         .and_then(|(at, amount)| (at == position).then_some(amount));
                     let under_plate = self.glide_paint.is_some_and(|(to, _)| to == position);
-                    let mut file_row = FileRow::new(&row, position, resource_column, listing.local_times())
-                        .system(listing.system_of(&row))
-                        .thumbnail(thumbnail_of(listing, thumbs, &row, edge, &mut wants))
-                        .hover(hover)
-                        .under_plate(under_plate)
-                        .editing(self.edit_of(position));
+                    let mut file_row =
+                        FileRow::new(&row, position, resource_column, listing.local_times())
+                            .system(listing.system_of(&row))
+                            .thumbnail(thumbnail_of(listing, thumbs, &row, edge, &mut wants))
+                            .hover(hover)
+                            .under_plate(under_plate)
+                            .editing(self.edit_of(position));
                     if in_results {
                         match_ranges(row.entry.name, listing.terms(), &mut self.ranges);
                         let folder = listing.folder_of(position).unwrap_or_default();
@@ -1583,18 +1594,16 @@ impl Explorer {
                         )
                     })
                     .ok();
-                match answer {
-                    Some(answer) => match {
-                        let result = answer.await;
-                        this.update(cx, |this, _| this.prompt_open = false).ok();
-                        result
-                    } {
-                        Ok(0) => Conflict::Replace,
-                        Ok(1) => Conflict::KeepBoth,
-                        Ok(2) => Conflict::Skip,
-                        _ => return,
-                    },
-                    None => return,
+                let Some(answer) = answer else {
+                    return;
+                };
+                let result = answer.await;
+                this.update(cx, |this, _| this.prompt_open = false).ok();
+                match result {
+                    Ok(0) => Conflict::Replace,
+                    Ok(1) => Conflict::KeepBoth,
+                    Ok(2) => Conflict::Skip,
+                    _ => return,
                 }
             };
             this.update_in(cx, |this, window, cx| {
