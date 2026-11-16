@@ -283,3 +283,13 @@ Write support of any kind; network filesystems; RAID, LVM, Core Storage, BitLock
 - **exFAT set checksum.** Not verified. A set with a wrong checksum lists as written; sets with a bad secondary count, a first secondary that is not a stream extension, a name entry of the wrong type, a zero name length or too few name entries are skipped.
 - **Free-space and times.** FAT `free_bytes` counts zero entries in the in-memory FAT (`None` when the FAT is over 64 MiB). exFAT times are reported in UTC when the entry carries a valid offset, else as stored, and `local_times` is false; FAT times are local, `local_times` is true.
 
+
+2026-11-16, ISO 9660 (lane C):
+
+- **Root node id.** The root's id is the byte offset of the root record inside its volume descriptor (primary, or Joliet when that tree is shown). `.` and `..` records are skipped everywhere, including the root's own record, which the descriptor holds with name byte 0.
+- **Extended attribute records.** A record's content starts after its extended attribute length (`@1`, in blocks), as the specification says; the design did not mention it.
+- **Relocated folders.** The `CL` placeholder is listed as the folder; its content is at the `CL` block, whose first (`.`) record gives the length. `RE` records are hidden. `PL` is ignored.
+- **Multi-extent files.** A node is the first record. Its further extents are read forward from it (at most 65,536 records inside 1 MiB of the folder); the listing shows one entry with the summed size.
+- **Names.** Plain and Joliet lookups ignore case; Rock Ridge lookups are exact. `/` and NUL in any name become `_` so a name can never be a path. A Rock Ridge `NM` that is empty, `.` or `..` falls back to the ISO name.
+- **Rock Ridge scope.** `SP`, `NM`, `PX`, `SL`, `TF` (short and long forms), `CE` (8 per record), `RE`, `CL`, `ST`. Owner comes from `PX`; modification and access times from `TF` take precedence over the record date. A symbolic link opens as its stored target text, and its listed size is the target's length. Device nodes, fifos and sockets are `NodeKind::Other`.
+- **Not done.** CD-ROM XA system-use records before the `SP` entry, `allocation_map`, interleaved files, 2352-byte raw sectors and a "View as" choice for hybrid discs (as designed).

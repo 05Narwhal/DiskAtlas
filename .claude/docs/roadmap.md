@@ -195,7 +195,7 @@ Design: `design/m7-apfs.md`.
 Design: `design/m8-formats-plugins.md`.
 
 - [x] F: Choose crates or in-house readers for FAT, exFAT, NTFS, ext4, ISO 9660, UDF. Checked 2026-11-12 (`design/m8-formats-plugins.md` §1): `ext4-view` 1.0.0 passes; `ntfs` 0.4.0 fails the freshness test (last release June 2023). Waiting for Julian: approve `ext4-view`, decide NTFS.
-- [ ] S or O per format: FAT, exFAT, ISO 9660 (S), ext through the crate (S), UDF (O), NTFS as Julian decides. Progress on `lane-c-formats` 2026-11-16: FAT12/16/32 (`fs/fat/`) and exFAT (`fs/exfat/`) are built, mount through `fs::probe::mount`, and each has a valid and a hostile test set, a fuzz target (`fat_mount`, `exfat_mount`) and seeds. ISO 9660, UDF and ext are not started.
+- [ ] S or O per format: FAT, exFAT, ISO 9660 (S), ext through the crate (S), UDF (O), NTFS as Julian decides. Progress on `lane-c-formats` 2026-11-16: FAT12/16/32 (`fs/fat/`) and exFAT (`fs/exfat/`) are built, mount through `fs::probe::mount`, and each has a valid and a hostile test set, a fuzz target (`fat_mount`, `exfat_mount`) and seeds. ISO 9660 with Joliet and Rock Ridge (`fs/iso9660/`, fuzz target `iso9660_mount`, built 2026-11-16, fuzz run pending). UDF and ext are not started.
 - [x] F: Plugin design (the README's goal of extensions that are not compiled in). `design/provider-protocol.md`: the byte-level protocol for extensions and the elevated helper.
 - [ ] O: `ipc/` and `RemoteFs` from the specification. **Moved to Later (2026-11-15)**, with the example extension and extensions in Settings.
 - [ ] S: Pinned folders. Lane D.

@@ -36,6 +36,7 @@ pub mod exfat;
 pub mod fat;
 pub mod hfs;
 pub mod hfsplus;
+pub mod iso9660;
 pub mod native;
 pub mod probe;
 

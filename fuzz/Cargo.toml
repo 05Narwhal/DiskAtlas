@@ -180,3 +180,10 @@ path = "fuzz_targets/icns.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "iso9660_mount"
+path = "fuzz_targets/iso9660_mount.rs"
+test = false
+doc = false
+bench = false
