@@ -187,3 +187,10 @@ path = "fuzz_targets/iso9660_mount.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "udf_mount"
+path = "fuzz_targets/udf_mount.rs"
+test = false
+doc = false
+bench = false
