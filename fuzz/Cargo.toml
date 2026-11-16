@@ -215,3 +215,7 @@ path = "fuzz_targets/apfs_btree_node.rs"
 test = false
 doc = false
 bench = false
+
+# The patched ext4-view (see ../vendor/ext4-view/PATCHES.md), as in the root Cargo.toml.
+[patch.crates-io]
+ext4-view = { path = "../vendor/ext4-view" }
