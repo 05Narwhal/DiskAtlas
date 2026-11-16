@@ -271,3 +271,15 @@ Packaging: 15 S per platform; 16 Julian decides on signing and notarization.
 ## 11. Out of scope
 
 Write support of any kind; network filesystems; RAID, LVM, Core Storage, BitLocker, LUKS and other volume layers (each is a `BlockSource` over other sources and would get its own design); ZFS, Btrfs, XFS, ReFS (plugins are the intended route); automatic updates.
+
+## Changes during build
+
+2026-11-16, FAT and exFAT (lane C):
+
+- **FAT root node id.** The design makes the FAT32 root the first byte offset of the root cluster, but the first entry of the root directory is at that same offset, so a file there would share the root's id. The FAT32 root is the root cluster's first byte plus one; entry offsets are multiples of 32, so no entry can have it. exFAT does the same.
+- **FAT `identity`.** `None`, as designed. The volume serial is not used.
+- **exFAT entry sets that cross a cluster.** A node id is the offset of the `0x85` primary. When the primary is the last slot of a cluster of a directory, its `0xC0` stream slot is in the directory's next cluster, which a bare offset cannot find (a FAT-chained directory's clusters need not be adjacent). The listing and `lookup` remember such sets (stream slot offset and parsed meta, at most 1,048,576), so `metadata` and `open` answer for any node that was listed or looked up. A node id invented without listing its folder, which happens to be a crossing primary, is `NotFound`. Sets that do not cross are read from the offset alone.
+- **exFAT free space.** `info.free_bytes` is counted from the allocation bitmap at mount only when the bitmap is at most 1 MiB (volumes up to about 8M clusters); otherwise `None`. `allocation_map` reads the whole bitmap in 64 KiB pieces.
+- **exFAT set checksum.** Not verified. A set with a wrong checksum lists as written; sets with a bad secondary count, a first secondary that is not a stream extension, a name entry of the wrong type, a zero name length or too few name entries are skipped.
+- **Free-space and times.** FAT `free_bytes` counts zero entries in the in-memory FAT (`None` when the FAT is over 64 MiB). exFAT times are reported in UTC when the entry carries a valid offset, else as stored, and `local_times` is false; FAT times are local, `local_times` is true.
+
