@@ -165,25 +165,31 @@ fn pieces(disk: &Disk, sources: &Sources, strip: &Strip, current: SourceId) -> V
     // Volumes sharing a partition (a container's) are one segment, named for the current one
     // when it is among them, else for the first in sidebar order.
     let spans = sources.spans(disk);
+    // A snapshot being browsed is drawn as its volume, which lies on the same bytes.
+    let live = sources.live_volume(current);
     let ranges: Vec<(u64, u64)> = spans.iter().map(|span| (span.start, span.len)).collect();
     layout(disk.size, &ranges)
         .into_iter()
         .filter_map(|segment| match segment.kind {
             SegmentKind::Volume(index) => {
                 let span = spans.get(index)?;
-                let id = span.lead(Some(current))?;
+                let id = span.lead(Some(live))?;
                 let name = sources.source(id)?.label.clone();
-                let is_current = span.holds(Some(current));
+                let is_current = span.holds(Some(live));
                 Some(Piece {
                     target: Some(id),
                     len: segment.len,
                     label: Some((name, span.len)),
                     is_current,
                     // The volumes of a container share one map: whichever has loaded.
-                    shade: span
-                        .volumes
-                        .iter()
-                        .find_map(|&volume| strip.shading(volume).cloned()),
+                    shade: is_current
+                        .then(|| strip.shading(current).cloned())
+                        .flatten()
+                        .or_else(|| {
+                            span.volumes
+                                .iter()
+                                .find_map(|&volume| strip.shading(volume).cloned())
+                        }),
                     marks: if is_current {
                         strip.marks(current).cloned()
                     } else {

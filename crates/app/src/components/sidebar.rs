@@ -60,6 +60,7 @@ use crate::theme::{
     motion::{self, Disclosure, Reveal},
     scale::{Density, radius, size, space, text},
 };
+use disk_atlas_lib::fs::SnapshotInfo;
 use disk_atlas_lib::fs::probe::VolumeRole;
 
 /// The groups in the order the sidebar draws them.
@@ -125,6 +126,15 @@ fn unsupported_reason(format: &str) -> String {
 fn role_note(label: &str, role: Option<VolumeRole>) -> Option<&'static str> {
     let name = role?.name();
     (!label.to_lowercase().contains(&name.to_lowercase())).then_some(name)
+}
+
+/// The text of the row that folds a volume's snapshots.
+fn snapshot_title(count: usize) -> String {
+    if count == 1 {
+        "1 snapshot".to_owned()
+    } else {
+        format!("{count} snapshots")
+    }
 }
 
 /// The text of "N other partitions".
@@ -199,11 +209,13 @@ enum Hit {
     Source(SourceId),
 }
 
-/// A part of the sidebar that opens and closes: a disk's volumes, or its other partitions.
+/// A part of the sidebar that opens and closes: a disk's volumes, its other partitions, or a
+/// volume's snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Fold {
     Disk(DiskId),
     Others(DiskId),
+    Snapshots(SourceId),
 }
 
 /// The sidebar: the sources, grouped.
@@ -217,6 +229,9 @@ pub struct Sidebar {
     open: HashMap<DiskId, bool>,
     /// Disks whose "other partitions" row is open.
     others_open: HashSet<DiskId>,
+    /// Volumes whose snapshots the user opened or closed by hand. Any other is open when one of
+    /// its snapshots is current.
+    snapshots_open: HashMap<SourceId, bool>,
     /// Folds opening or closing (`r1-redesign.md` 2.2).
     folds: HashMap<Fold, Disclosure>,
     /// The height of each fold's content as last laid out, which its opening grows to.
@@ -265,6 +280,7 @@ impl Sidebar {
             view,
             open: HashMap::new(),
             others_open: HashSet::new(),
+            snapshots_open: HashMap::new(),
             folds: HashMap::new(),
             fold_heights: Rc::new(RefCell::new(HashMap::new())),
             frame_now: Instant::now(),
@@ -639,13 +655,15 @@ impl Sidebar {
             .iter()
             .filter_map(|&id| sources.source(id))
             .collect();
-        let holds_current = volumes.iter().any(|source| Some(source.id) == current);
+        // A snapshot being browsed counts as its volume for the heading and the fold.
+        let live = current.map(|id| sources.live_volume(id));
+        let holds_current = volumes.iter().any(|source| Some(source.id) == live);
         let is_open = self.open.get(&disk.id).copied().unwrap_or(holds_current);
         let disk_fold = self.fold_frame(Fold::Disk(disk.id));
 
         *next_index += 1;
         let heading = self
-            .disk_heading(disk, sources, current, is_open, *next_index, colors, cx)
+            .disk_heading(disk, sources, live, is_open, *next_index, colors, cx)
             .into_any_element();
         // Closing, the volumes stay drawn until they have folded away.
         if !is_open && disk_fold.is_none() {
@@ -670,6 +688,11 @@ impl Sidebar {
                         )
                         .into_any_element(),
                     );
+                    if let Some(snapshots) = sources.snapshots(source.id) {
+                        rows.extend(self.snapshot_rows(
+                            source.id, snapshots, next_index, current, sources, colors, cx,
+                        ));
+                    }
                 }
                 Placement::Other(reason) => others.push((source, reason)),
             }
@@ -695,6 +718,125 @@ impl Sidebar {
             }
         }
         vec![heading, self.fold(Fold::Disk(disk.id), rows, disk_fold)]
+    }
+
+    /// Under a volume with snapshots: the quiet "N snapshots" row and, opened, one row per
+    /// snapshot, newest first.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the rows are built from exactly these parts"
+    )]
+    fn snapshot_rows(
+        &self,
+        volume: SourceId,
+        snapshots: &[SnapshotInfo],
+        next_index: &mut usize,
+        current: Option<SourceId>,
+        sources: &Sources,
+        colors: &Colors,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let holds_current = current.is_some_and(|id| {
+            sources
+                .source(id)
+                .and_then(|source| source.snapshot)
+                .is_some_and(|snapshot| snapshot.volume == volume)
+        });
+        let is_open = self
+            .snapshots_open
+            .get(&volume)
+            .copied()
+            .unwrap_or(holds_current);
+        let fold = Fold::Snapshots(volume);
+        let frame = self.fold_frame(fold);
+        let hover = colors.hover;
+        *next_index += 1;
+        let title = div()
+            .id(("sidebar-snapshots", *next_index))
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .h(Density::default().sidebar_row_height())
+            .pl(metrics::ROW_PADDING + space::S8 + space::S16)
+            .pr(space::S8)
+            .gap(space::S8)
+            .rounded(radius::ROW)
+            .cursor_pointer()
+            .text_size(text::SMALL.size)
+            .text_color(colors.ink3)
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let now = this.snapshots_open.get(&volume).copied().unwrap_or(is_open);
+                this.snapshots_open.insert(volume, !now);
+                this.start_fold(fold, !now, cx);
+                cx.notify();
+            }))
+            .child(chevron(is_open, colors))
+            .child(snapshot_title(snapshots.len()));
+        let mut rows = vec![title.into_any_element()];
+        if is_open || frame.is_some() {
+            let items = snapshots
+                .iter()
+                .map(|snapshot| {
+                    *next_index += 1;
+                    let opened = sources.snapshot_source(volume, snapshot.id);
+                    let is_current = opened.is_some() && opened == current;
+                    self.snapshot_item(*next_index, volume, snapshot, is_current, colors, cx)
+                        .into_any_element()
+                })
+                .collect();
+            rows.push(self.fold(fold, items, frame));
+        }
+        rows
+    }
+
+    /// One snapshot: its name, and when it was taken under it. Choosing it opens the snapshot
+    /// in the background and then shows it.
+    fn snapshot_item(
+        &self,
+        index: usize,
+        volume: SourceId,
+        snapshot: &SnapshotInfo,
+        is_current: bool,
+        colors: &Colors,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let id = snapshot.id;
+        let (hover, pressed) = (colors.hover, colors.field);
+        let item = div()
+            .id(("sidebar-snapshot", index))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .py(space::S4)
+            .pl(metrics::ROW_PADDING + space::S8 + space::S16 + space::S16)
+            .pr(space::S8)
+            .rounded(radius::ROW)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.sources
+                    .update(cx, |sources, cx| sources.open_snapshot(volume, id, cx));
+            }))
+            .child(
+                div()
+                    .truncate()
+                    .text_color(colors.ink2)
+                    .when(is_current, |name| name.font_weight(FontWeight::BOLD))
+                    .child(snapshot.name.clone()),
+            )
+            .children(snapshot.created.map(|created| {
+                div()
+                    .text_size(text::SMALL.size)
+                    .text_color(colors.ink3)
+                    .child(format::date_time(created))
+            }));
+        if is_current {
+            item.bg(hover)
+        } else {
+            item.hover(move |style| style.bg(hover))
+                .active(move |style| style.bg(pressed))
+        }
     }
 
     /// This frame of `fold`'s opening or closing, `None` at rest.
@@ -1309,6 +1451,12 @@ mod tests {
             placement(None, &unsupported("Unknown")),
             Placement::Other("Disk Atlas does not recognise what is stored here.".into())
         );
+    }
+
+    #[test]
+    fn the_snapshot_row_counts_them() {
+        assert_eq!(snapshot_title(1), "1 snapshot");
+        assert_eq!(snapshot_title(12), "12 snapshots");
     }
 
     #[test]

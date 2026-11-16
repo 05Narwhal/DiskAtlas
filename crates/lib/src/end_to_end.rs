@@ -1475,3 +1475,111 @@ fn write_sample_images() {
         write_sparse_bundle(&out.join(format!("{name}.sparsebundle")), &disk, 8192);
     }
 }
+
+// ---- APFS -------------------------------------------------------------------
+
+/// A GPT disk: the APFS container `container` with the APFS type, then an
+/// empty EFI System partition.
+fn apfs_gpt_disk(container: &[u8]) -> Vec<u8> {
+    let sectors = container.len() / 512;
+    let efi_first = VOLUME_START + sectors;
+    let total = efi_first + 64 + 40;
+    let mut d = gpt::testutil::build(
+        512,
+        total,
+        &[
+            gpt::testutil::Spec {
+                type_guid: Guid::APFS.0,
+                first: VOLUME_START as u64,
+                last: (VOLUME_START + sectors - 1) as u64,
+                name: "Container",
+            },
+            gpt::testutil::Spec {
+                type_guid: Guid::EFI_SYSTEM.0,
+                first: efi_first as u64,
+                last: (efi_first + 63) as u64,
+                name: "EFI",
+            },
+        ],
+    );
+    d[VOLUME_START * 512..VOLUME_START * 512 + container.len()].copy_from_slice(container);
+    d
+}
+
+/// One APFS volume as a clean walk finds it: its name, role, tree (forks
+/// included) and the tree of each snapshot. The trees are `Debug` text, so
+/// walks compare without `Found` implementing `PartialEq`.
+type ApfsVolume = (String, Option<probe::VolumeRole>, String, Vec<String>);
+
+fn apfs_volumes(volumes: Vec<probe::ContainerVolume>, what: &str) -> Vec<ApfsVolume> {
+    let tree = |fs: &dyn FileSystem| {
+        let walked = walk(fs, Limits::clean().with_forks());
+        assert_eq!(walked.errors, 0, "{what}: {}", fs.info().name);
+        assert!(!walked.bound_hit, "{what}: {}", fs.info().name);
+        format!("{:?}", walked.entries)
+    };
+    volumes
+        .into_iter()
+        .map(|volume| {
+            let probe::VolumeState::Ready(fs) = volume.state else {
+                panic!("{what}: {} does not mount", volume.name);
+            };
+            let snapshots = fs
+                .snapshots()
+                .unwrap()
+                .iter()
+                .map(|snapshot| tree(&*fs.open_snapshot(snapshot.id).unwrap()))
+                .collect();
+            (volume.name, volume.role, tree(&*fs), snapshots)
+        })
+        .collect()
+}
+
+#[test]
+fn apfs_container_in_every_image() {
+    use crate::fs::apfs::{
+        self,
+        test_container::{ContainerBuilder, sealed_with_snapshot, standard_volume},
+    };
+
+    let built = ContainerBuilder::new()
+        .volumes(vec![sealed_with_snapshot(), standard_volume("Data", 0x9)])
+        .build();
+    // What the container holds, read directly.
+    let direct = apfs::mount(Arc::new(MemSource::new(built.image.clone()))).unwrap();
+    let expect = apfs_volumes(direct, "the bare container");
+    assert_eq!(expect.len(), 2);
+    assert_eq!(expect[0].3.len(), 1, "the system volume has one snapshot");
+    assert_ne!(
+        expect[0].2, expect[0].3[0],
+        "the snapshot is an older state"
+    );
+
+    let disk = apfs_gpt_disk(&built.image);
+    for container in Container::ALL {
+        let what = format!("APFS in GPT in {container:?}");
+        let temp = container.write(&disk);
+        let opened = image::open(&temp.0).unwrap();
+        assert_eq!(opened.format, container.format(), "{what}");
+        let source = opened.source;
+        let map = partition::read(source.as_ref()).unwrap().unwrap();
+        assert!(map.damage.is_empty(), "{what}: {:?}", map.damage);
+        let part = map
+            .partitions
+            .iter()
+            .find(|p| p.name.as_deref() == Some("Container"))
+            .unwrap();
+        assert_eq!(part.len, built.image.len() as u64, "{what}");
+        let volume: Arc<dyn BlockSource> = Arc::new(part.slice(Arc::clone(&source)).unwrap());
+        assert_eq!(
+            probe::probe(volume.as_ref()).unwrap(),
+            Content::Apfs,
+            "{what}"
+        );
+        let Some(probe::Mount::Container(volumes)) = probe::mount(volume, Content::Apfs).unwrap()
+        else {
+            panic!("{what}: APFS mounts as a container");
+        };
+        assert_eq!(apfs_volumes(volumes, &what), expect, "{what}");
+    }
+}

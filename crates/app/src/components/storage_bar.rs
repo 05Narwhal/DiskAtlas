@@ -926,13 +926,15 @@ impl StorageBar {
             }
             SourceKind::Volume { disk, .. } => {
                 let disk = sources.disk(disk)?;
+                // A snapshot being browsed is drawn as its volume, which lies on the same bytes.
+                let live = sources.live_volume(current);
                 // The volumes of a container share a partition: one part, standing for the
                 // current volume when it is one of them.
                 let volumes: Vec<(SourceId, u64, u64, usize)> = sources
                     .spans(disk)
                     .iter()
                     .filter_map(|span| {
-                        let lead = span.lead(Some(current))?;
+                        let lead = span.lead(Some(live))?;
                         Some((lead, span.start, span.len, span.volumes.len()))
                     })
                     .collect();
@@ -965,7 +967,7 @@ impl StorageBar {
                     let Some(source) = sources.source(id) else {
                         continue;
                     };
-                    let is_current = id == current;
+                    let is_current = id == live;
                     let info = source.fs.info();
                     let used = info
                         .total_bytes
@@ -1048,7 +1050,8 @@ impl StorageBar {
                     Some(IndexState::Ready(_)) => Status::Measuring,
                     Some(IndexState::Failed(_)) => Status::None,
                     Some(IndexState::Absent) | None => {
-                        if index_on_open(cx) {
+                        // A snapshot is never read on open: its index builds on first use.
+                        if index_on_open(cx) && current_source.snapshot.is_none() {
                             Status::Reading(0)
                         } else {
                             Status::Calculate(current)

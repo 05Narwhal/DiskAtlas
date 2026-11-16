@@ -712,9 +712,12 @@ fn find_by_names<S: AsRef<str>>(index: &Index, names: &[S]) -> Option<u32> {
     Some(at)
 }
 
-/// True for a source that gets an index as soon as it is listed: a browsable volume.
+/// True for a source that gets an index as soon as it is listed: a browsable volume. Never a
+/// snapshot: its index builds on first use, like a host folder's (design/m7-apfs.md §8).
 fn indexed_eagerly(source: &Source) -> bool {
-    matches!(source.kind, SourceKind::Volume { .. }) && source.availability.is_browsable()
+    matches!(source.kind, SourceKind::Volume { .. })
+        && source.snapshot.is_none()
+        && source.availability.is_browsable()
 }
 
 /// True for a source that is indexed when it is listed: `on_open` is the setting "Read disks
@@ -1052,6 +1055,7 @@ mod tests {
             availability: Availability::Browsable,
             system: None,
             role: None,
+            snapshot: None,
         }
     }
 

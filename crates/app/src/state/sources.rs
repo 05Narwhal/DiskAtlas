@@ -24,6 +24,7 @@
 //! that decide what a disk contains ([`lay_out`], [`prepare`]) are plain and GPUI-free so they can
 //! be tested with in-memory disks.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ use disk_atlas_lib::fs::probe::{
     ContainerVolume, Content, Mount, VolumeRole, VolumeState, mount as mount_content,
     probe as probe_content,
 };
-use disk_atlas_lib::fs::{DirStream, FileSystem, Metadata, NodeId, VolumeInfo};
+use disk_atlas_lib::fs::{DirStream, FileSystem, Metadata, NodeId, SnapshotInfo, VolumeInfo};
 use disk_atlas_lib::image;
 use disk_atlas_lib::io::block::{BlockSource, Slice};
 use disk_atlas_lib::io::cache::{CachedSource, ChunkCache, DEFAULT_BUDGET};
@@ -243,6 +244,24 @@ pub struct Source {
     /// What a volume of a container (APFS) is for, when the container says. The sidebar orders
     /// and dims by it; it never decides what can be read.
     pub role: Option<VolumeRole>,
+    /// Set for an earlier state of a volume, opened from its snapshot row. Such a source is not
+    /// one of its disk's `volumes`: the sidebar lists it under its volume.
+    pub snapshot: Option<SnapshotOf>,
+}
+
+/// What a snapshot source shows: an earlier state of `volume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotOf {
+    /// The volume it is a snapshot of.
+    pub volume: SourceId,
+    /// The snapshot's id on that volume.
+    pub id: u64,
+}
+
+/// `snapshots` newest first; one without a date last. Ties keep the higher id first.
+fn newest_first(mut snapshots: Vec<SnapshotInfo>) -> Vec<SnapshotInfo> {
+    snapshots.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    snapshots
 }
 
 /// Where a volume of a container goes among its siblings: Data and volumes without a role first,
@@ -760,6 +779,12 @@ pub struct Sources {
     next_disk: u32,
     /// The one chunk cache every device and image reads through.
     cache: Arc<ChunkCache>,
+    /// The snapshots of each volume that has any, newest first. Asked once, after mounting.
+    snapshots: HashMap<SourceId, Arc<[SnapshotInfo]>>,
+    /// The source of each snapshot opened so far, by (volume, snapshot id): kept for the session.
+    snapshot_sources: HashMap<(SourceId, u64), SourceId>,
+    /// Counts snapshot openings; only the latest selects its source when it is ready.
+    snapshot_request: u64,
     _tasks: Vec<Task<()>>,
 }
 
@@ -852,6 +877,9 @@ impl Sources {
             next_id: 0,
             next_disk: 0,
             cache,
+            snapshots: HashMap::new(),
+            snapshot_sources: HashMap::new(),
+            snapshot_request: 0,
             _tasks: vec![home_task, roots_task, disks_task, volumes_task],
         }
     }
@@ -942,6 +970,153 @@ impl Sources {
         self.items.iter().find(|source| source.id == id)
     }
 
+    /// The volume `id` stands for on its disk: the live volume of a snapshot, else `id` itself.
+    pub fn live_volume(&self, id: SourceId) -> SourceId {
+        self.source(id)
+            .and_then(|source| source.snapshot)
+            .map_or(id, |snapshot| snapshot.volume)
+    }
+
+    /// The snapshots of `volume`, newest first, once listed. `None` when it has none.
+    pub fn snapshots(&self, volume: SourceId) -> Option<&Arc<[SnapshotInfo]>> {
+        self.snapshots.get(&volume)
+    }
+
+    /// The source of snapshot `id` of `volume`, when it has been opened.
+    pub fn snapshot_source(&self, volume: SourceId, id: u64) -> Option<SourceId> {
+        self.snapshot_sources.get(&(volume, id)).copied()
+    }
+
+    /// Opens snapshot `id` of `volume` in the background as a source of its own, then
+    /// [`SourcesEvent::Selected`] names it. One already opened is selected at once. When the user
+    /// picks another snapshot before this one is ready, this one is kept but not selected.
+    pub fn open_snapshot(&mut self, volume: SourceId, id: u64, cx: &mut Context<Self>) {
+        self.snapshot_request = self.snapshot_request.wrapping_add(1);
+        if let Some(existing) = self.snapshot_source(volume, id) {
+            cx.emit(SourcesEvent::Selected(existing));
+            return;
+        }
+        let Some(parent) = self.source(volume).cloned() else {
+            return;
+        };
+        let request = self.snapshot_request;
+        let fs = Arc::clone(&parent.fs);
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { fs.open_snapshot(id) })
+                .await;
+            this.update(cx, |this, cx| {
+                // The same snapshot asked twice while it opened: the first one in wins.
+                let added = match this.snapshot_source(volume, id) {
+                    Some(existing) => existing,
+                    None => this.add_snapshot(&parent, id, opened),
+                };
+                cx.emit(SourcesEvent::Changed);
+                if this.snapshot_request == request {
+                    cx.emit(SourcesEvent::Selected(added));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Adds the source of snapshot `id` of `parent`: browsable when it opened, else failed with
+    /// the reason, so selecting it says what went wrong.
+    fn add_snapshot(
+        &mut self,
+        parent: &Source,
+        id: u64,
+        opened: EngineResult<Arc<dyn FileSystem>>,
+    ) -> SourceId {
+        let source_id = self.next_source_id();
+        let name = self
+            .snapshots(parent.id)
+            .and_then(|list| list.iter().find(|snapshot| snapshot.id == id))
+            .map_or_else(
+                || format!("snapshot {id}"),
+                |snapshot| snapshot.name.clone(),
+            );
+        let (fs, availability, label) = match opened {
+            Ok(fs) => {
+                let label = fs.info().name;
+                (fs, Availability::Browsable, label)
+            }
+            Err(error) => {
+                let label = format!("{} \u{2014} {name}", parent.label);
+                (
+                    Unavailable::arc(&label),
+                    Availability::Failed(
+                        format!("This snapshot could not be read ({error}).").into(),
+                    ),
+                    label,
+                )
+            }
+        };
+        self.items.push(Source {
+            id: source_id,
+            group: parent.group,
+            label: SharedString::from(label),
+            format: parent.format.clone(),
+            fs,
+            kind: parent.kind,
+            availability,
+            system: parent.system,
+            role: parent.role,
+            snapshot: Some(SnapshotOf {
+                volume: parent.id,
+                id,
+            }),
+        });
+        self.snapshot_sources.insert((parent.id, id), source_id);
+        source_id
+    }
+
+    /// Asks every browsable volume in `volumes` for its snapshots, on the background executor,
+    /// and records the ones that have any in one update.
+    fn list_snapshots(&mut self, volumes: &[SourceId], cx: &mut Context<Self>) {
+        let asked: Vec<(SourceId, Arc<dyn FileSystem>)> = volumes
+            .iter()
+            .filter_map(|&id| self.source(id))
+            .filter(|source| source.availability.is_browsable())
+            .map(|source| (source.id, Arc::clone(&source.fs)))
+            .collect();
+        if asked.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    asked
+                        .into_iter()
+                        .filter_map(|(id, fs)| match fs.snapshots() {
+                            Ok(list) if !list.is_empty() => Some((id, newest_first(list))),
+                            Ok(_) => None,
+                            Err(error) => {
+                                tracing::debug!(%error, "could not list a volume's snapshots");
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            if found.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                for (id, list) in found {
+                    this.snapshots.insert(id, list.into());
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Opens the disk image at `path` in the background and adds it to Disk images; then
     /// [`SourcesEvent::Selected`] names its first source. An image already listed is not added
     /// again: it is selected.
@@ -1026,6 +1201,7 @@ impl Sources {
                 availability,
                 system: plan.system,
                 role,
+                snapshot: None,
             });
         }
         let whole = whole.map(|availability| {
@@ -1040,6 +1216,7 @@ impl Sources {
                 availability,
                 system: None,
                 role: None,
+                snapshot: None,
             });
             id
         });
@@ -1055,6 +1232,12 @@ impl Sources {
             whole,
         });
         let first = self.disks.last().and_then(Disk::first_source);
+        let listed = self
+            .disks
+            .last()
+            .map(|disk| disk.volumes.clone())
+            .unwrap_or_default();
+        self.list_snapshots(&listed, cx);
         cx.emit(SourcesEvent::Changed);
         cx.notify();
         first
@@ -1080,6 +1263,7 @@ impl Sources {
                 availability: Availability::Browsable,
                 system: None,
                 role: None,
+                snapshot: None,
             });
         }
         if self.items.len() != before {
@@ -1628,6 +1812,146 @@ mod tests {
         assert!(shared.holds(Some(id(2))));
         assert!(!shared.holds(Some(id(4))) && !shared.holds(None));
         assert!(group_spans(&[]).is_empty());
+    }
+
+    /// A volume with three snapshots, of which only 7 opens.
+    struct Snapshotted;
+
+    impl FileSystem for Snapshotted {
+        fn info(&self) -> VolumeInfo {
+            VolumeInfo::new("Data")
+        }
+
+        fn root(&self) -> NodeId {
+            NodeId(0)
+        }
+
+        fn metadata(&self, _node: NodeId) -> EngineResult<Metadata> {
+            Err(cannot_read_yet())
+        }
+
+        fn lookup(&self, _dir: NodeId, _name: &str) -> EngineResult<Option<NodeId>> {
+            Err(cannot_read_yet())
+        }
+
+        fn read_dir(&self, _dir: NodeId) -> EngineResult<Box<dyn DirStream>> {
+            Err(cannot_read_yet())
+        }
+
+        fn snapshots(&self) -> EngineResult<Vec<SnapshotInfo>> {
+            let snap = |id, name: &str, at: Option<i64>| SnapshotInfo {
+                id,
+                name: name.to_owned(),
+                created: at.map(|seconds| disk_atlas_lib::fs::Timestamp::from_unix(seconds, 0)),
+            };
+            Ok(vec![
+                snap(3, "old", Some(100)),
+                snap(5, "undated", None),
+                snap(7, "new", Some(200)),
+            ])
+        }
+
+        fn open_snapshot(&self, id: u64) -> EngineResult<Arc<dyn FileSystem>> {
+            if id == 7 {
+                Ok(Unavailable::arc("Data \u{2014} new"))
+            } else {
+                Err(Error::unsupported("a snapshot that holds no data"))
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn snapshots_list_newest_first_and_open_as_sources(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        cx.executor().allow_parking();
+        let sources = cx.new(Sources::new);
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let selected = Rc::clone(&selected);
+            cx.subscribe(&sources, move |_, event: &SourcesEvent, _| {
+                if let SourcesEvent::Selected(id) = event {
+                    selected.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+        });
+        let volume = sources
+            .update(cx, |sources, cx| {
+                sources.add_disk(
+                    PreparedDisk {
+                        found: found(SourceGroup::DiskImages),
+                        scheme: None,
+                        volumes: vec![PreparedVolume {
+                            plan: apfs_plan(),
+                            fs: Some(Arc::new(Snapshotted)),
+                            availability: Availability::Browsable,
+                            role: Some(VolumeRole::Data),
+                        }],
+                        whole: None,
+                    },
+                    cx,
+                )
+            })
+            .expect("the disk has a volume");
+        selected.borrow_mut().clear();
+        cx.run_until_parked();
+        let listed = cx.update(|cx| {
+            sources
+                .read(cx)
+                .snapshots(volume)
+                .map(|list| list.iter().map(|s| s.id).collect::<Vec<_>>())
+        });
+        assert_eq!(listed, Some(vec![7, 3, 5]), "newest first, undated last");
+
+        // Two picks in a row: both are kept, only the second is shown.
+        sources.update(cx, |sources, cx| {
+            sources.open_snapshot(volume, 3, cx);
+            sources.open_snapshot(volume, 7, cx);
+        });
+        cx.run_until_parked();
+        let (failed, opened) = cx.update(|cx| {
+            let sources = sources.read(cx);
+            (
+                sources.snapshot_source(volume, 3).expect("3 is kept"),
+                sources.snapshot_source(volume, 7).expect("7 is kept"),
+            )
+        });
+        assert_eq!(*selected.borrow(), vec![opened]);
+        cx.update(|cx| {
+            let sources = sources.read(cx);
+            let new = sources.source(opened).unwrap();
+            assert_eq!(new.label.as_ref(), "Data \u{2014} new");
+            assert!(new.availability.is_browsable());
+            assert_eq!(new.snapshot, Some(SnapshotOf { volume, id: 7 }));
+            assert_eq!(new.kind, sources.source(volume).unwrap().kind);
+            assert_eq!(sources.live_volume(opened), volume);
+            assert_eq!(sources.live_volume(volume), volume);
+            let old = sources.source(failed).unwrap();
+            assert_eq!(old.label.as_ref(), "Container disk2 \u{2014} old");
+            let Availability::Failed(text) = &old.availability else {
+                panic!("expected a failure");
+            };
+            assert!(
+                text.starts_with("This snapshot could not be read ("),
+                "{text}"
+            );
+            // Snapshots are not volumes of the disk: no row and no span of their own.
+            let disk = sources
+                .disks()
+                .iter()
+                .find(|disk| disk.volumes.contains(&volume))
+                .unwrap();
+            assert_eq!(disk.volumes, vec![volume]);
+        });
+
+        // Asked again: the same source, selected at once.
+        let count = cx.update(|cx| sources.read(cx).items().len());
+        sources.update(cx, |sources, cx| sources.open_snapshot(volume, 3, cx));
+        assert_eq!(selected.borrow().last(), Some(&failed));
+        assert_eq!(cx.update(|cx| sources.read(cx).items().len()), count);
     }
 
     #[test]
