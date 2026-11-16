@@ -13,7 +13,7 @@
 //
 // See the LICENSE file for the full license text.
 
-use super::test_image::{BLOCK, Item, LABEL, MTIME, build};
+use super::test_image::{BLOCK, FIRST_TABLE, INODE_SIZE, Item, LABEL, MTIME, build};
 use super::*;
 use crate::fs::DirBatch;
 use crate::fs::probe::{self, Content};
@@ -122,6 +122,25 @@ fn reads_direct_and_indirect_files_exactly() {
     let docs = fs.lookup(fs.root(), "Docs").unwrap().unwrap();
     let empty = fs.lookup(docs, "empty").unwrap().unwrap();
     assert_eq!(fs.open(empty, Stream::Data).unwrap().len(), 0);
+}
+
+/// A sparse file: one block of data, then holes as far as the size says, across
+/// the single and double indirect ranges. A zero pointer is a hole, not block 0
+/// of the volume (found on a real mke2fs image; ext4-view 1.0.0 failed it).
+#[test]
+fn holes_under_indirect_blocks_read_as_zeros() {
+    let mut image = build(&[Item::File("sparse", vec![7u8; BLOCK])]);
+    // The first inode the builder hands out is 11. Raise its size to 300,000
+    // bytes (293 blocks, past 12 direct + 256 indirect) with no blocks behind it.
+    let size_at = FIRST_TABLE * BLOCK + 10 * INODE_SIZE + 4;
+    image[size_at..size_at + 4].copy_from_slice(&300_000u32.to_le_bytes());
+    let fs = mount(Arc::new(MemSource::new(image))).expect("mount");
+    let node = fs.lookup(fs.root(), "sparse").unwrap().unwrap();
+    let source = fs.open(node, Stream::Data).unwrap();
+    assert_eq!(source.len(), 300_000);
+    let data = read_all(&*source);
+    assert!(data[..BLOCK].iter().all(|&b| b == 7));
+    assert!(data[BLOCK..].iter().all(|&b| b == 0));
 }
 
 #[test]

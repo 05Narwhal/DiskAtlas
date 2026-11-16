@@ -4,6 +4,8 @@ members = [
     "crates/app",
     "crates/lib",
 ]
+# vendor/ holds patched copies of dependencies; they are not ours to lint.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "26.0.1-alpha"
@@ -23,6 +25,10 @@ disk-atlas-lib = { path = "crates/lib" }
 # ext2/3/4 reader (lead session, 2026-11-16; MIT OR Apache-2.0, 1.0.0 released
 # 2026-09-14, no unsafe, reads through its own positional-read trait).
 ext4-view = "1"
+# ext4-view 1.0.0 treats a hole covering a whole indirect block of an ext2/3
+# file as corruption (found by the real-image conformance run, lane D1,
+# 2026-11-16). Patched copy in vendor/ext4-view; see its PATCHES.md. Drop the
+# patch when upstream releases the fix.
 
 # UI framework. Pinned exactly: the GPUI API changes between releases.
 gpui = "=0.2.2"
@@ -126,3 +132,6 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 debug = "line-tables-only"
+
+[patch.crates-io]
+ext4-view = { path = "vendor/ext4-view" }

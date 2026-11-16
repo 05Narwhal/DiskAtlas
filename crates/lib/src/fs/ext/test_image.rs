@@ -25,10 +25,10 @@ pub const MTIME: u32 = 1_700_000_000;
 pub const LABEL: &[u8] = b"TESTEXT";
 pub const UUID: [u8; 16] = *b"0123456789abcdef";
 
-const INODE_SIZE: usize = 128;
+pub const INODE_SIZE: usize = 128;
 const INODES: usize = 32;
 const TABLE_BLOCKS: usize = INODES * INODE_SIZE / BLOCK;
-const FIRST_TABLE: usize = 5;
+pub const FIRST_TABLE: usize = 5;
 const FIRST_DATA: usize = FIRST_TABLE + TABLE_BLOCKS;
 const TOTAL_BLOCKS: usize = 160;
 

@@ -202,7 +202,13 @@ impl ShortEntry {
                     b
                 };
                 let c = cp437::decode(b);
-                out.push(if lower { c.to_ascii_lowercase() } else { c });
+                if lower {
+                    // Code page 437 has accented capitals (0x90 is É); the case
+                    // bits lower those too, as Windows does.
+                    out.extend(c.to_lowercase());
+                } else {
+                    out.push(c);
+                }
             }
         };
         if base.is_empty() && ext.is_empty() {
@@ -538,6 +544,11 @@ mod tests {
         let e = ShortEntry::parse(&short(b"           ", 0, 0), FatKind::Fat16).unwrap();
         e.short_name_into(&mut s);
         assert_eq!(s, "");
+        // 0x90 is É in code page 437; the lower-case bit makes it é.
+        s.clear();
+        let e = ShortEntry::parse(&short(b"CAF\x90    TXT", 0, 0x18), FatKind::Fat16).unwrap();
+        e.short_name_into(&mut s);
+        assert_eq!(s, "caf\u{E9}.txt");
     }
 
     fn lfn_entry(seq: u8, checksum: u8, text: &[u16]) -> [u8; 32] {

@@ -459,13 +459,17 @@ fn walk_volume(fs: &dyn FileSystem, max_entries: usize, read_data: bool) -> Walk
 
 // ---- comparing with a manifest ----------------------------------------------
 
-/// Names the manifest script skips at the volume root.
-const SCRIPT_SKIPS: [&str; 5] = [
+/// Names the manifest script skips at the volume root, and the folders the
+/// Linux formatting tools add (mke2fs's `lost+found`, genisoimage's `rr_moved`
+/// for deep Rock Ridge trees).
+const SCRIPT_SKIPS: [&str; 7] = [
     ".Spotlight-V100",
     ".fseventsd",
     ".Trashes",
     ".DocumentRevisions-V100",
     ".TemporaryItems",
+    "lost+found",
+    "rr_moved",
 ];
 /// Root entries macOS hides and the engine lists (the journal files and the
 /// hot files tree).
@@ -550,7 +554,9 @@ fn compare(manifest: &Manifest, walk: &Walk, read_data: bool) -> Differences {
             );
             continue;
         }
-        if m.kind != 'd' && m.size != e.size {
+        // UDF's listing leaves a link's size empty (reading every target while
+        // listing would be slow); `stat` has it. An absent size is not a mismatch.
+        if m.kind != 'd' && m.size != e.size && !(m.kind == 'l' && e.size.is_none()) {
             note(
                 "size",
                 &m.path,
@@ -822,7 +828,15 @@ fn run(args: &Args) -> Result<bool, String> {
         .filter(|v| {
             matches!(
                 v.content,
-                Content::HfsPlus | Content::Hfsx | Content::HfsWrapped | Content::Apfs
+                Content::HfsPlus
+                    | Content::Hfsx
+                    | Content::HfsWrapped
+                    | Content::Apfs
+                    | Content::Fat
+                    | Content::ExFat
+                    | Content::Iso9660
+                    | Content::Udf
+                    | Content::Ext
             )
         })
         .collect();
@@ -876,6 +890,37 @@ fn run(args: &Args) -> Result<bool, String> {
             }
             continue;
         }
+        if !matches!(
+            volume.content,
+            Content::HfsPlus | Content::Hfsx | Content::HfsWrapped
+        ) {
+            // The other formats mount through the probe, as the app does.
+            let fs = match probe::mount(Arc::clone(&volume.source), volume.content) {
+                Ok(Some(Mount::Volume(fs))) => fs,
+                Ok(_) => {
+                    println!("mount: FAILED: not mounted as a volume");
+                    problems = true;
+                    continue;
+                }
+                Err(e) => {
+                    println!("mount: FAILED: {e}");
+                    problems = true;
+                    continue;
+                }
+            };
+            println!(
+                "mount: ok in {:.1} ms",
+                mount_started.elapsed().as_secs_f64() * 1000.0
+            );
+            problems |= check_fs(
+                fs.as_ref(),
+                args,
+                manifest.as_ref(),
+                single,
+                &mut manifest_used,
+            );
+            continue;
+        }
         let fs = match hfsplus::mount(Arc::clone(&volume.source)) {
             Ok(fs) => fs,
             Err(e) => {
@@ -904,7 +949,7 @@ fn run(args: &Args) -> Result<bool, String> {
     }
     if readable.is_empty() {
         println!();
-        println!("no HFS+ or APFS volume found");
+        println!("no readable volume found");
     }
     if !manifest_used {
         println!();
