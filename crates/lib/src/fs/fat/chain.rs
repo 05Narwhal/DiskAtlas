@@ -77,6 +77,27 @@ impl Chain {
         }
     }
 
+    /// A chain from runs already worked out (exFAT follows its own FAT).
+    /// The runs are in content order, never empty, and start at 0 with no
+    /// gaps. `broken` is the damage that ended the chain, reported when a
+    /// read reaches it.
+    pub fn from_runs(
+        source: Arc<dyn BlockSource>,
+        runs: Vec<Run>,
+        broken: Option<Corruption>,
+    ) -> Self {
+        let covered = runs
+            .last()
+            .map_or(0, |r| r.file_start.saturating_add(r.len));
+        Self {
+            source,
+            runs,
+            size: covered,
+            covered,
+            broken,
+        }
+    }
+
     /// `len` bytes at `offset` of the volume as one run (the fixed root
     /// directory of FAT12/16).
     pub fn region(source: Arc<dyn BlockSource>, offset: u64, len: u64) -> Self {
