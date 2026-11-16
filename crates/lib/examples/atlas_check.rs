@@ -31,14 +31,15 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use disk_atlas_lib::fs::hfsplus::{self, HfsPlus, unicode};
-use disk_atlas_lib::fs::probe::{self, Content};
+use disk_atlas_lib::fs::hfsplus::{self, unicode};
+use disk_atlas_lib::fs::probe::{self, Content, Mount, VolumeState};
 use disk_atlas_lib::fs::{
     DirBatch, DirProgress, FileSystem, JournalState, NodeId, NodeKind, Stream,
 };
@@ -354,7 +355,7 @@ fn checksum(source: &dyn BlockSource) -> Result<(u32, u64), String> {
     Ok(sum.finish())
 }
 
-fn walk_volume(fs: &HfsPlus, max_entries: usize, read_data: bool) -> Walk {
+fn walk_volume(fs: &dyn FileSystem, max_entries: usize, read_data: bool) -> Walk {
     let started = Instant::now();
     let mut walk = Walk::default();
     let mut stack: Vec<(NodeId, String, usize)> = vec![(fs.root(), String::new(), 0)];
@@ -816,21 +817,65 @@ fn run(args: &Args) -> Result<bool, String> {
         Err(e) => println!("partition map: unreadable: {e}"),
     }
 
-    let hfs: Vec<&Volume> = volumes
+    let readable: Vec<&Volume> = volumes
         .iter()
         .filter(|v| {
             matches!(
                 v.content,
-                Content::HfsPlus | Content::Hfsx | Content::HfsWrapped
+                Content::HfsPlus | Content::Hfsx | Content::HfsWrapped | Content::Apfs
             )
         })
         .collect();
+    let single = readable.len() == 1;
     let mut manifest_used = manifest.is_none();
     let mut problems = false;
-    for volume in &hfs {
+    for volume in &readable {
         println!();
         println!("== {} ({})", volume.label, volume.content.format_name());
         let mount_started = Instant::now();
+        if volume.content == Content::Apfs {
+            let mount = match probe::mount(Arc::clone(&volume.source), Content::Apfs) {
+                Ok(Some(Mount::Container(volumes))) => volumes,
+                Ok(_) => {
+                    println!("mount: FAILED: not mounted as a container");
+                    problems = true;
+                    continue;
+                }
+                Err(e) => {
+                    println!("mount: FAILED: {e}");
+                    problems = true;
+                    continue;
+                }
+            };
+            println!(
+                "container: ok in {:.1} ms, {} volumes",
+                mount_started.elapsed().as_secs_f64() * 1000.0,
+                mount.len()
+            );
+            for (i, cv) in mount.iter().enumerate() {
+                println!();
+                println!("-- volume {i}: {:?}, role {:?}", cv.name, cv.role);
+                match &cv.state {
+                    VolumeState::Ready(fs) => {
+                        problems |= check_snapshots(fs.as_ref());
+                        problems |= check_fs(
+                            fs.as_ref(),
+                            args,
+                            manifest.as_ref(),
+                            single && mount.len() == 1,
+                            &mut manifest_used,
+                        );
+                    }
+                    VolumeState::Locked(_) => println!("state: locked (encrypted)"),
+                    VolumeState::Failed(e) => {
+                        println!("state: FAILED: {e}");
+                        problems = true;
+                    }
+                    _ => println!("state: unknown"),
+                }
+            }
+            continue;
+        }
         let fs = match hfsplus::mount(Arc::clone(&volume.source)) {
             Ok(fs) => fs,
             Err(e) => {
@@ -839,21 +884,127 @@ fn run(args: &Args) -> Result<bool, String> {
                 continue;
             }
         };
-        let info = fs.info();
         println!(
             "mount: ok in {:.1} ms",
             mount_started.elapsed().as_secs_f64() * 1000.0
         );
-        println!("volume name: {:?}", info.name);
-        if let Some(format) = info.format {
-            println!("format: {format}");
-        }
         println!("journal: {}", journal_text(fs.journal()));
-        if let (Some(total), Some(free)) = (info.total_bytes, info.free_bytes) {
-            println!("capacity: {}, free: {}", size_text(total), size_text(free));
-        }
+        problems |= check_fs(&fs, args, manifest.as_ref(), single, &mut manifest_used);
+    }
+    for volume in volumes
+        .iter()
+        .filter(|v| !readable.iter().any(|h| std::ptr::eq(*h, *v)))
+    {
+        println!();
+        println!(
+            "== {}: {} (no reader yet, not walked)",
+            volume.label,
+            volume.content.format_name()
+        );
+    }
+    if readable.is_empty() {
+        println!();
+        println!("no HFS+ or APFS volume found");
+    }
+    if !manifest_used {
+        println!();
+        println!("the manifest's volume was not found among the volumes");
+        problems = true;
+    }
+    println!();
+    println!("total time: {:.1} s", started.elapsed().as_secs_f64());
+    Ok(problems)
+}
 
-        let walk = walk_volume(&fs, args.max_entries, args.read_data);
+/// Lists a volume's snapshots and opens each one, timing both. Returns
+/// whether anything failed.
+fn check_snapshots(fs: &dyn FileSystem) -> bool {
+    let started = Instant::now();
+    let snapshots = match fs.snapshots() {
+        Ok(list) => list,
+        Err(e) => {
+            println!("snapshots: FAILED: {e}");
+            return true;
+        }
+    };
+    println!(
+        "snapshots: {} listed in {:.1} ms",
+        snapshots.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    let mut problems = false;
+    for (i, snap) in snapshots.iter().enumerate() {
+        let opened = Instant::now();
+        let result = fs.open_snapshot(snap.id).and_then(|s| {
+            let mut stream = s.read_dir(s.root())?;
+            let mut batch = DirBatch::new();
+            stream.next_batch(&mut batch, 256)?;
+            Ok(batch.iter().count())
+        });
+        let ms = opened.elapsed().as_secs_f64() * 1000.0;
+        let created = snap.created.map(|t| t.unix_seconds());
+        match result {
+            // Print the first few in full; a Time Machine disk has hundreds.
+            Ok(n) if i < 20 => println!(
+                "  {:?} (created {created:?}): opened, {n} root entries, {ms:.1} ms",
+                snap.name
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                println!("  {:?}: FAILED: {e} ({ms:.1} ms)", snap.name);
+                problems = true;
+            }
+        }
+    }
+    if !snapshots.is_empty() {
+        println!(
+            "snapshots opened: {:.1} ms in all",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    problems
+}
+
+/// Walks one mounted volume, times its scan, optionally builds its index
+/// and compares it with the manifest. Returns whether anything failed.
+fn check_fs(
+    fs: &dyn FileSystem,
+    args: &Args,
+    manifest: Option<&Manifest>,
+    single: bool,
+    manifest_used: &mut bool,
+) -> bool {
+    let mut problems = false;
+    let info = fs.info();
+    println!("volume name: {:?}", info.name);
+    if let Some(format) = &info.format {
+        println!("format: {format}");
+    }
+    if let (Some(total), Some(free)) = (info.total_bytes, info.free_bytes) {
+        println!("capacity: {}, free: {}", size_text(total), size_text(free));
+    }
+
+    let scan_started = Instant::now();
+    match fs.scan(&mut |_| ControlFlow::Continue(())) {
+        Ok(summary) => {
+            let secs = scan_started.elapsed().as_secs_f64();
+            println!(
+                "scan: {} entries, {} skipped, {:.3} s ({:.0} entries/s)",
+                summary.entries,
+                summary.skipped,
+                secs,
+                summary.entries as f64 / secs.max(1e-9)
+            );
+            problems |= summary.skipped > 0;
+        }
+        Err(e) => {
+            println!("scan: FAILED: {e}");
+            problems = true;
+        }
+    }
+
+    {
+        let walk = walk_volume(fs, args.max_entries, args.read_data);
         println!(
             "walk: {} entries ({} folders, {} files, {} links, {} other); data {}; resource forks {}",
             walk.entries.len(),
@@ -897,7 +1048,7 @@ fn run(args: &Args) -> Result<bool, String> {
         if args.index {
             let started = Instant::now();
             let cancel = AtomicBool::new(false);
-            match search::build(&fs, &cancel, &mut |_| {}) {
+            match search::build(fs, &cancel, &mut |_| {}) {
                 Ok(Some(index)) => {
                     let secs = started.elapsed().as_secs_f64();
                     let summary = index.summary();
@@ -921,10 +1072,10 @@ fn run(args: &Args) -> Result<bool, String> {
             }
         }
 
-        if let Some(manifest) = &manifest {
+        if let Some(manifest) = manifest {
             let wanted = key_of(&manifest.volume);
-            if hfs.len() == 1 || key_of(&info.name) == wanted {
-                manifest_used = true;
+            if single || key_of(&info.name) == wanted {
+                *manifest_used = true;
                 problems |= report_comparison(manifest, &walk, args.read_data);
             } else {
                 println!(
@@ -934,29 +1085,7 @@ fn run(args: &Args) -> Result<bool, String> {
             }
         }
     }
-    for volume in volumes
-        .iter()
-        .filter(|v| !hfs.iter().any(|h| std::ptr::eq(*h, *v)))
-    {
-        println!();
-        println!(
-            "== {}: {} (no reader yet, not walked)",
-            volume.label,
-            volume.content.format_name()
-        );
-    }
-    if hfs.is_empty() {
-        println!();
-        println!("no HFS+ volume found");
-    }
-    if !manifest_used {
-        println!();
-        println!("the manifest's volume was not found among the HFS+ volumes");
-        problems = true;
-    }
-    println!();
-    println!("total time: {:.1} s", started.elapsed().as_secs_f64());
-    Ok(problems)
+    problems
 }
 
 fn main() -> ExitCode {

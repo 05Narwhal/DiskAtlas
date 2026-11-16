@@ -1,6 +1,6 @@
 # Conformance pass
 
-Disk Atlas reads HFS+ volumes and disk images from bytes alone. The unit tests
+Disk Atlas reads HFS+ and APFS volumes and disk images from bytes alone. The unit tests
 use volumes and images that our own code wrote, so they cannot catch a
 misreading shared by writer and reader. This folder holds what is needed to
 check the engine against real macOS: a script that lists a mounted volume as
@@ -49,7 +49,7 @@ is written out in the script's header. Paths and targets use `%25`, `%09`,
 Make images from a folder of real content (a copy of a project, some photos,
 a file with a resource fork, a hard link, a symlink, a few names with accents
 or emoji). Add `-fs HFS+` (or `-fs "Journaled HFS+"`, or `-fs HFSX`): without
-it recent macOS makes APFS images, which Disk Atlas cannot read yet. Add
+it recent macOS makes APFS images (also worth checking, see below). Add
 `-layout NONE`, `-layout SPUD` (Apple Partition Map) or `-layout GPTSPUD`
 (GPT) to choose the partition map; the default is GPT.
 
@@ -102,12 +102,15 @@ and the like elsewhere). Everything is opened read-only. For each image the
 checker prints the image format, the disk size, the partition map and each
 partition with its probed content, and for every HFS+ volume the mount
 result, the volume name, the journal state, a walk of the whole tree with
-counts and errors, and timings.
+counts and errors, and timings. For an APFS container it prints every volume
+with its role and state (ready, locked or failed), then for each ready volume
+its snapshots (each one opened and its root listed, with timings), a timed
+`scan`, and the same walk.
 
 - `--read-data` reads the data of every file: it adds a throughput line and
   is needed for checksum comparison.
 - `--manifest FILE` compares the walk with a manifest, for the volume whose
-  name matches the manifest's first line (or the only HFS+ volume).
+  name matches the manifest's first line (or the only volume).
 - `--max-entries N` stops each volume's walk after N entries, for a first
   look at a very large disk.
 
