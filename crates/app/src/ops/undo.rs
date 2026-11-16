@@ -36,16 +36,6 @@ pub enum Step {
 }
 
 impl Step {
-    /// What undoing it is called, for the menu and the failure sentence.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Moved { .. } => "Undo move or rename",
-            Self::NewFolder { .. } => "Undo new folder",
-            Self::Copied { .. } => "Undo copy",
-            Self::Trashed { .. } => "Undo move to the Recycle Bin",
-        }
-    }
-
     /// Takes the step back. Blocking. The error is a sentence for the user.
     pub fn undo(&self) -> Result<(), String> {
         match self {
@@ -56,14 +46,25 @@ impl Step {
                         name_of(from)
                     ));
                 }
-                std::fs::rename(to, from)
-                    .map_err(|error| format!("Could not move \u{201c}{}\u{201d} back: {error}", name_of(to)))
+                std::fs::rename(to, from).map_err(|error| {
+                    format!(
+                        "Could not move \u{201c}{}\u{201d} back: {error}",
+                        name_of(to)
+                    )
+                })
             }
             Self::NewFolder { path } => std::fs::remove_dir(path).map_err(|error| {
-                format!("Could not remove \u{201c}{}\u{201d}: {error}", name_of(path))
+                format!(
+                    "Could not remove \u{201c}{}\u{201d}: {error}",
+                    name_of(path)
+                )
             }),
             Self::Copied { created } => {
-                let paths: Vec<HostPath> = created.iter().cloned().map(HostPath::new_unchecked).collect();
+                let paths: Vec<HostPath> = created
+                    .iter()
+                    .cloned()
+                    .map(HostPath::new_unchecked)
+                    .collect();
                 super::trash(&paths)
             }
             Self::Trashed { originals } => restore(originals),
@@ -117,11 +118,6 @@ impl UndoStack {
         if self.steps.len() > MAX_STEPS {
             self.steps.remove(0);
         }
-    }
-
-    /// The step Ctrl+Z would take back.
-    pub fn last(&self) -> Option<&Step> {
-        self.steps.last()
     }
 
     /// Takes the newest step off the stack.

@@ -43,6 +43,7 @@ pub struct IconTile {
     /// Decoded picture of the file, when the thumbnail pipeline has one.
     thumbnail: Option<Arc<RenderImage>>,
     link: bool,
+    editing: Option<crate::state::rename::RenameEdit>,
     selected: bool,
     cursor: bool,
     system: bool,
@@ -61,6 +62,7 @@ impl IconTile {
             glyph: Glyph::from_class(classify_entry(entry.name, entry.is_browsable(), None)),
             thumbnail: None,
             link: entry.kind == NodeKind::Symlink,
+            editing: None,
             selected: row.selected,
             cursor: row.cursor,
             system: false,
@@ -74,6 +76,12 @@ impl IconTile {
     /// Draws `image` in place of the glyph.
     pub fn thumbnail(mut self, image: Option<Arc<RenderImage>>) -> Self {
         self.thumbnail = image;
+        self
+    }
+
+    /// Draws the name as an edit field.
+    pub fn editing(mut self, edit: Option<crate::state::rename::RenameEdit>) -> Self {
+        self.editing = edit;
         self
     }
 
@@ -153,6 +161,14 @@ impl RenderOnce for IconTile {
             .child(self.name);
         if self.link {
             label = label.italic();
+        }
+        if let Some(edit) = &self.editing {
+            label = div()
+                .w_full()
+                .h(px(LABEL_HEIGHT))
+                .flex()
+                .justify_center()
+                .child(crate::components::rename_text::rename_text(edit, &colors));
         }
 
         let mut tile = div()

@@ -219,6 +219,8 @@ pub struct FileRow {
     /// A picture's thumbnail, drawn in place of the glyph.
     thumbnail: Option<std::sync::Arc<gpui::RenderImage>>,
     link: bool,
+    /// The name as it is being edited in place.
+    editing: Option<crate::state::rename::RenameEdit>,
     selected: bool,
     cursor: bool,
     /// True for a housekeeping item: drawn quieter.
@@ -267,6 +269,7 @@ impl FileRow {
             glyph: Glyph::from_class(classify_entry(entry.name, browsable, None)),
             thumbnail: None,
             link: entry.kind == NodeKind::Symlink,
+            editing: None,
             selected: row.selected,
             cursor: row.cursor,
             system: false,
@@ -282,6 +285,12 @@ impl FileRow {
     /// Draws `image` in the icon tile in place of the glyph.
     pub fn thumbnail(mut self, image: Option<std::sync::Arc<gpui::RenderImage>>) -> Self {
         self.thumbnail = image;
+        self
+    }
+
+    /// Draws the name as an edit field.
+    pub fn editing(mut self, edit: Option<crate::state::rename::RenameEdit>) -> Self {
+        self.editing = edit;
         self
     }
 
@@ -388,6 +397,12 @@ impl RenderOnce for FileRow {
         };
         if self.link {
             name = name.italic();
+        }
+        if let Some(edit) = &self.editing {
+            name = div()
+                .flex_1()
+                .min_w_0()
+                .child(crate::components::rename_text::rename_text(edit, &colors));
         }
 
         let inner = inner

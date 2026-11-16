@@ -22,6 +22,7 @@ pub mod disk_strip;
 pub mod file_row;
 pub mod icon_tile;
 pub mod menu;
+pub mod rename_text;
 pub mod search_field;
 pub mod sidebar;
 pub mod statusbar;

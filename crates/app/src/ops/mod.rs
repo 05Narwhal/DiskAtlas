@@ -112,10 +112,9 @@ pub fn check_name(name: &str) -> Result<(), NameError> {
     if name.trim().is_empty() {
         return Err(NameError::Empty);
     }
-    if let Some(c) = name
-        .chars()
-        .find(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-    {
+    if let Some(c) = name.chars().find(|c| {
+        c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    }) {
         return Err(NameError::BadCharacter(c));
     }
     if name == "." || name == ".." || name.ends_with('.') || name.ends_with(' ') {
@@ -183,7 +182,8 @@ pub fn new_folder(parent: &HostPath) -> io::Result<PathBuf> {
 /// Renames the item at `from` to `new_name` in the same folder. Refuses a name that is taken,
 /// except for a change of case only.
 pub fn rename(from: &HostPath, new_name: &str) -> io::Result<PathBuf> {
-    check_name(new_name).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.message()))?;
+    check_name(new_name)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.message()))?;
     let from = from.path();
     let to = from.with_file_name(new_name);
     let same_item_other_case = from
@@ -199,6 +199,23 @@ pub fn rename(from: &HostPath, new_name: &str) -> io::Result<PathBuf> {
     Ok(to)
 }
 
+/// The first of `items` that is, or holds, a disk or image Disk Atlas has open. A host
+/// operation never targets one (rule 1).
+pub fn open_conflict<'a>(items: &'a [HostPath], open: &[PathBuf]) -> Option<&'a HostPath> {
+    items
+        .iter()
+        .find(|item| open.iter().any(|path| path.starts_with(item.path())))
+}
+
+/// How many of `items` already have a namesake in `dir`.
+pub fn count_conflicts(items: &[HostPath], dir: &HostPath) -> usize {
+    items
+        .iter()
+        .filter_map(|item| item.path().file_name())
+        .filter(|name| exists(&dir.path().join(name)))
+        .count()
+}
+
 /// Moves `paths` to the Recycle Bin (Trash on macOS and Linux).
 pub fn trash(paths: &[HostPath]) -> Result<(), String> {
     trash::delete_all(paths.iter().map(HostPath::path)).map_err(|error| error.to_string())
@@ -206,7 +223,11 @@ pub fn trash(paths: &[HostPath]) -> Result<(), String> {
 
 /// Copies the file or folder `from` into the folder `dir`, applying `conflict` when the name is
 /// taken. Links are not followed and not copied. Returns the new path, or `None` when skipped.
-pub fn copy_into(from: &HostPath, dir: &HostPath, conflict: Conflict) -> io::Result<Option<PathBuf>> {
+pub fn copy_into(
+    from: &HostPath,
+    dir: &HostPath,
+    conflict: Conflict,
+) -> io::Result<Option<PathBuf>> {
     let (from, dir) = (from.path(), dir.path());
     let name = from
         .file_name()
@@ -228,7 +249,11 @@ pub fn copy_into(from: &HostPath, dir: &HostPath, conflict: Conflict) -> io::Res
 
 /// Moves the item `from` into the folder `dir`. Within a volume it is a rename; across volumes
 /// it is a copy, a check of the copy, then removing the original.
-pub fn move_into(from: &HostPath, dir: &HostPath, conflict: Conflict) -> io::Result<Option<PathBuf>> {
+pub fn move_into(
+    from: &HostPath,
+    dir: &HostPath,
+    conflict: Conflict,
+) -> io::Result<Option<PathBuf>> {
     let (source, folder) = (from.path(), dir.path());
     let name = source
         .file_name()
@@ -368,6 +393,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn open_images_and_their_folders_are_protected() {
+        let image = PathBuf::from("/disks/os9.dmg");
+        let open = vec![image];
+        let holder = [HostPath::for_test(PathBuf::from("/disks"))];
+        let itself = [HostPath::for_test(PathBuf::from("/disks/os9.dmg"))];
+        let other = [HostPath::for_test(PathBuf::from("/disks/other.dmg"))];
+        assert!(open_conflict(&holder, &open).is_some());
+        assert!(open_conflict(&itself, &open).is_some());
+        assert!(open_conflict(&other, &open).is_none());
+    }
+
+    #[test]
     fn the_stem_stops_before_the_last_dot() {
         assert_eq!(stem_len("photo.jpg"), 5);
         assert_eq!(stem_len("a.tar.gz"), 5);
@@ -426,19 +463,30 @@ pub(crate) mod tests {
         let a = HostPath::for_test(src.join("a.txt"));
         assert_eq!(copy_into(&a, &dst_host, Conflict::Skip).unwrap(), None);
         assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"old");
-        let kept = copy_into(&a, &dst_host, Conflict::KeepBoth).unwrap().unwrap();
+        let kept = copy_into(&a, &dst_host, Conflict::KeepBoth)
+            .unwrap()
+            .unwrap();
         assert_eq!(kept.file_name().unwrap(), "a (2).txt");
         assert_eq!(std::fs::read(&kept).unwrap(), b"new");
 
         let tree = HostPath::for_test(src.join("tree"));
-        let copied = copy_into(&tree, &dst_host, Conflict::Skip).unwrap().unwrap();
+        let copied = copy_into(&tree, &dst_host, Conflict::Skip)
+            .unwrap()
+            .unwrap();
         assert_eq!(std::fs::read(copied.join("inner/f.txt")).unwrap(), b"data");
         assert!(src.join("tree").exists());
 
-        let moved = move_into(&a, &HostPath::for_test(dir.0.join("elsewhere")), Conflict::Skip);
+        let moved = move_into(
+            &a,
+            &HostPath::for_test(dir.0.join("elsewhere")),
+            Conflict::Skip,
+        );
         assert!(moved.is_err(), "the target folder does not exist");
         // Moving into its own folder changes nothing; into itself is refused.
-        assert_eq!(move_into(&a, &HostPath::for_test(src.clone()), Conflict::Skip).unwrap(), None);
+        assert_eq!(
+            move_into(&a, &HostPath::for_test(src.clone()), Conflict::Skip).unwrap(),
+            None
+        );
         let inside = HostPath::for_test(src.join("tree/inner"));
         assert!(move_into(&tree, &inside, Conflict::Skip).is_err());
         assert!(copy_into(&tree, &inside, Conflict::Skip).is_err());

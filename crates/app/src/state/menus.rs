@@ -785,6 +785,7 @@ mod tests {
             [
                 "View >",
                 "  List",
+                "  Icons",
                 "  Space map",
                 "  -",
                 "  Show hidden items",
@@ -824,10 +825,11 @@ mod tests {
             &state,
         ));
         assert_eq!(
-            &got[..6],
+            &got[..7],
             [
                 "View >",
                 "  List",
+                "  Icons",
                 "  Space map",
                 "  -",
                 "  Show hidden items*",
@@ -843,8 +845,8 @@ mod tests {
             in_search: true,
         });
         assert_eq!(got[0], "View >");
-        assert_eq!(got[6], "Sort by >");
-        assert_eq!(got[7], "  Relevance");
+        assert_eq!(got[7], "Sort by >");
+        assert_eq!(got[8], "  Relevance");
         assert!(!got.contains(&"Refresh".to_owned()));
         assert!(got.contains(&"  Folder".to_owned()));
     }

@@ -70,6 +70,8 @@ pub const COPY_DETAILS: &str = "CopyDetails";
 
 /// Key context of the search field (`components/search_field.rs`).
 pub const SEARCH_FIELD: &str = "SearchField";
+/// The file list while a name is being edited in place.
+pub const RENAMING: &str = "Renaming";
 
 /// Key context of an open menu (`components/menu.rs`).
 pub const MENU: &str = "Menu";
@@ -248,6 +250,52 @@ pub mod file_list {
             ShowInFolder,
             /// Open the file under the cursor in its own app (files of this computer).
             OpenInApp,
+        ]
+    );
+}
+
+/// Actions on the host's own files (R8), in the file list, and the keys of the in-place name
+/// editor.
+pub mod host_ops {
+    gpui::actions!(
+        host_ops,
+        [
+            /// Rename the item under the cursor in place (F2).
+            Rename,
+            /// Make a new folder and start naming it (Ctrl+Shift+N).
+            NewFolder,
+            /// Move the selected items to the Recycle Bin (Delete).
+            MoveToTrash,
+            /// Take back the last operation (Ctrl+Z).
+            Undo,
+            /// Remember the selected items to copy (Ctrl+C).
+            CopyItems,
+            /// Remember the selected items to move (Ctrl+X).
+            CutItems,
+            /// Copy or move the remembered items here (Ctrl+V).
+            PasteItems,
+            /// Name editor: caret left.
+            EditLeft,
+            /// Name editor: caret right.
+            EditRight,
+            /// Name editor: extend the selection left.
+            EditSelectLeft,
+            /// Name editor: extend the selection right.
+            EditSelectRight,
+            /// Name editor: caret to the start.
+            EditHome,
+            /// Name editor: caret to the end.
+            EditEnd,
+            /// Name editor: delete before the caret.
+            EditBackspace,
+            /// Name editor: delete after the caret.
+            EditDelete,
+            /// Name editor: select the whole name.
+            EditSelectAll,
+            /// Name editor: keep the new name.
+            EditCommit,
+            /// Name editor: leave the name as it was.
+            EditCancel,
         ]
     );
 }
@@ -487,10 +535,31 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-enter", ShowInFolder, list),
         KeyBinding::new("shift-enter", OpenInApp, list),
         KeyBinding::new("secondary-shift-c", CopyToComputer, list),
+        KeyBinding::new("f2", host_ops::Rename, list),
+        KeyBinding::new("secondary-shift-n", host_ops::NewFolder, list),
+        KeyBinding::new("delete", host_ops::MoveToTrash, list),
+        KeyBinding::new("secondary-z", host_ops::Undo, list),
+        KeyBinding::new("secondary-c", host_ops::CopyItems, list),
+        KeyBinding::new("secondary-x", host_ops::CutItems, list),
+        KeyBinding::new("secondary-v", host_ops::PasteItems, list),
         // The list hands Space back when it continues a name being typed.
         KeyBinding::new("space", quick_look::Toggle, list),
         KeyBinding::new("menu", menu::Open, list),
         KeyBinding::new("shift-f10", menu::Open, list),
+    ]);
+    let editing = Some(RENAMING);
+    cx.bind_keys([
+        KeyBinding::new("left", host_ops::EditLeft, editing),
+        KeyBinding::new("right", host_ops::EditRight, editing),
+        KeyBinding::new("shift-left", host_ops::EditSelectLeft, editing),
+        KeyBinding::new("shift-right", host_ops::EditSelectRight, editing),
+        KeyBinding::new("home", host_ops::EditHome, editing),
+        KeyBinding::new("end", host_ops::EditEnd, editing),
+        KeyBinding::new("backspace", host_ops::EditBackspace, editing),
+        KeyBinding::new("delete", host_ops::EditDelete, editing),
+        KeyBinding::new("secondary-a", host_ops::EditSelectAll, editing),
+        KeyBinding::new("enter", host_ops::EditCommit, editing),
+        KeyBinding::new("escape", host_ops::EditCancel, editing),
     ]);
     cx.bind_keys([
         KeyBinding::new("menu", menu::Open, Some(SIDEBAR)),

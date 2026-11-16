@@ -26,6 +26,7 @@ pub mod navigation;
 pub mod order;
 pub mod properties;
 pub mod quick_look;
+pub mod rename;
 pub mod search;
 pub mod selection;
 pub mod settings;
