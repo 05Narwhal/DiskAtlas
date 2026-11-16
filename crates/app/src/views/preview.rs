@@ -140,6 +140,7 @@ pub struct QuickLookPanel {
     tab_focus: [FocusHandle; 3],
     fork_focus: [FocusHandle; 2],
     close_focus: FocusHandle,
+    fullscreen_focus: FocusHandle,
     text_scroll: UniformListScrollHandle,
     details_scroll: UniformListScrollHandle,
     /// The text list's widest row, with the generation it was found for.
@@ -168,6 +169,7 @@ impl QuickLookPanel {
             tab_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             fork_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             close_focus: cx.focus_handle().tab_stop(true),
+            fullscreen_focus: cx.focus_handle().tab_stop(true),
             text_scroll: UniformListScrollHandle::new(),
             details_scroll: UniformListScrollHandle::new(),
             widest: None,
@@ -189,6 +191,7 @@ impl QuickLookPanel {
         if self.quick_look.read(cx).tab() == Tab::Bytes {
             order.push(self.bytes.read(cx).focus_stop());
         }
+        order.push(self.fullscreen_focus.clone());
         order.push(self.close_focus.clone());
         order
     }
@@ -374,6 +377,26 @@ impl QuickLookPanel {
                 .child(label)
             })
             .collect::<Vec<_>>();
+        let fullscreen = Self::button(
+            "quick-look-fullscreen",
+            &self.fullscreen_focus,
+            false,
+            colors.hover,
+            colors,
+            |_, window, _| window.toggle_fullscreen(),
+            cx,
+        )
+        .debug_selector(|| "quick-look-fullscreen".to_owned())
+        .w(metrics::QUICK_LOOK_TOOL_WIDTH)
+        .h(size::CONTROL)
+        .px(Pixels::ZERO)
+        .child(
+            svg()
+                .path(icon::MAXIMIZE)
+                .flex_none()
+                .size(metrics::ICON_CAPTION)
+                .text_color(colors.ink2),
+        );
         let close = Self::button(
             "quick-look-close",
             &self.close_focus,
@@ -481,6 +504,7 @@ impl QuickLookPanel {
                     .items_center()
                     .justify_end()
                     .gap(space::S4)
+                    .child(fullscreen)
                     .child(close),
             )
     }
@@ -809,6 +833,9 @@ impl Render for QuickLookPanel {
             }))
             .on_action(cx.listener(|this, _: &actions::LastFile, _, cx| {
                 this.move_selection(Motion::Last, cx);
+            }))
+            .on_action(cx.listener(|_, _: &actions::ToggleFullscreen, window, _| {
+                window.toggle_fullscreen();
             }))
             .on_action(cx.listener(|this, _: &actions::NextTab, _, cx| this.cycle_tab(true, cx)))
             .on_action(cx.listener(|this, _: &actions::PreviousTab, _, cx| {

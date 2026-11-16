@@ -310,6 +310,8 @@ pub mod quick_look {
             Toggle,
             /// Close the panel and return to the list (Escape).
             Close,
+            /// Full screen on or off (F11, Ctrl+Cmd+F on macOS).
+            ToggleFullscreen,
             /// Show the next tab.
             NextTab,
             /// Show the previous tab.
@@ -589,6 +591,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-tab", quick_look::NextTab, None),
         KeyBinding::new("ctrl-shift-tab", quick_look::PreviousTab, None),
         KeyBinding::new("secondary-g", quick_look::GoToByte, None),
+        KeyBinding::new("f11", quick_look::ToggleFullscreen, Some(QUICK_LOOK)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-cmd-f", quick_look::ToggleFullscreen, Some(QUICK_LOOK)),
     ]);
     // Escape and Ctrl+W close any auxiliary window. Quick Look's own Escape and Space (below) are in
     // a deeper context, and GPUI tries the deepest matching context first, so they win there.
