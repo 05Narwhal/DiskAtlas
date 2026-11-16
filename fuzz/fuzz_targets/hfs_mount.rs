@@ -88,6 +88,8 @@ fn copy_into(volume: &Hfs, dest: &Path) {
     let options = CopyOptions {
         forks: true,
         hidden: true,
+        // Everything on the volume is copied, as before the switch existed.
+        copy_system_items: true,
         rules: HostRules::Windows,
     };
     let cancel = AtomicBool::new(false);

@@ -179,3 +179,22 @@ noise to ignore.
   for it, and the macOS version that last wrote to it.
 - Anything that crashed, hung, or took much longer than the disk's size
   suggests, with the command line.
+
+## 3. Linux images (no Mac needed)
+
+`linux-images.sh` builds real images with the standard Linux tools, fills each
+with a test tree (`make-tree.sh`), writes a manifest of the tree
+(`manifest-linux.sh`, the same format as `manifest.sh`) and runs
+`atlas_check --manifest --read-data` on each image:
+
+```
+cargo build --release -p disk-atlas-lib --example atlas_check
+sudo tools/conformance/linux-images.sh out/ target/release/examples/atlas_check [ext2 ext3 ext4 fat12 fat16 fat32 exfat iso udf hfsplus]
+```
+
+Under WSL, run it as root (`wsl -u root`) and pass the Windows `.exe`; it
+converts paths with `wslpath`. Needs `e2fsprogs`, `dosfstools`, `mtools`,
+`exfatprogs`, `exfat-fuse`, `genisoimage`, `udftools`, `hfsprogs`, `openssl`.
+The trees are built under `TZ=UTC` because FAT stores local time with no zone.
+Folders the formatting tools add (`lost+found`, `rr_moved`) are expected extras.
+HFS+ is checked on an empty volume only; filling one needs a Mac.
