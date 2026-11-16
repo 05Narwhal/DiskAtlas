@@ -231,7 +231,11 @@ impl Icns {
         candidates.sort_by_key(|&(_, size, how)| {
             (
                 size < wanted,
-                if size >= wanted { size } else { u32::MAX - size },
+                if size >= wanted {
+                    size
+                } else {
+                    u32::MAX.saturating_sub(size)
+                },
                 how != Storage::Png,
             )
         });
@@ -257,11 +261,19 @@ impl Icns {
                 for i in 0..pixels {
                     out.extend_from_slice(&[*r.get(i)?, *g.get(i)?, *b.get(i)?, *a.get(i)?]);
                 }
-                Some(IconImage::Rgba(Rgba { width: size, height: size, pixels: out }))
+                Some(IconImage::Rgba(Rgba {
+                    width: size,
+                    height: size,
+                    pixels: out,
+                }))
             }
             Storage::Rgb => {
                 // `it32` has four zero bytes before the planes.
-                let body = if kind == b"it32" { data.get(4..)? } else { data };
+                let body = if kind == b"it32" {
+                    data.get(4..)?
+                } else {
+                    data
+                };
                 let pixels = usize::try_from(size.checked_mul(size)?).ok()?;
                 let planes = unpack(body, pixels.checked_mul(3)?)?;
                 let (r, rest) = planes.split_at(pixels);
@@ -275,7 +287,11 @@ impl Icns {
                     };
                     out.extend_from_slice(&[*r.get(i)?, *g.get(i)?, *b.get(i)?, alpha]);
                 }
-                Some(IconImage::Rgba(Rgba { width: size, height: size, pixels: out }))
+                Some(IconImage::Rgba(Rgba {
+                    width: size,
+                    height: size,
+                    pixels: out,
+                }))
             }
         }
     }
@@ -331,7 +347,12 @@ pub(crate) mod test_icns {
                 i += run;
             } else {
                 let mut end = i + 1;
-                while end < bytes.len() && end - i < 128 && !(end + 2 < bytes.len() && bytes[end] == bytes[end + 1] && bytes[end] == bytes[end + 2]) {
+                while end < bytes.len()
+                    && end - i < 128
+                    && !(end + 2 < bytes.len()
+                        && bytes[end] == bytes[end + 1]
+                        && bytes[end] == bytes[end + 2])
+                {
                     end += 1;
                 }
                 out.push((end - i - 1) as u8);
@@ -398,7 +419,10 @@ mod tests {
         let Some(IconImage::Rgba(image)) = Icns::parse(&file).unwrap().best(16) else {
             panic!("no picture");
         };
-        assert_eq!((image.width, image.height, image.pixels.len()), (16, 16, 16 * 16 * 4));
+        assert_eq!(
+            (image.width, image.height, image.pixels.len()),
+            (16, 16, 16 * 16 * 4)
+        );
         assert_eq!(&image.pixels[..4], &[200, 0, 9, 255]);
         assert_eq!(&image.pixels[(130 * 4)..(130 * 4 + 4)], &[200, 4, 9, 0]);
     }

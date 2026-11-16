@@ -217,16 +217,29 @@ mod tests {
         assert_eq!(
             tags,
             vec![
-                Tag { name: "Work".into(), colour: 6 },
-                Tag { name: "Plain".into(), colour: 0 },
-                Tag { name: "Odd\n9".into(), colour: 0 },
+                Tag {
+                    name: "Work".into(),
+                    colour: 6
+                },
+                Tag {
+                    name: "Plain".into(),
+                    colour: 0
+                },
+                Tag {
+                    name: "Odd\n9".into(),
+                    colour: 0
+                },
             ]
         );
     }
 
     #[test]
     fn origins_and_comments() {
-        let froms = where_froms(&string_array(&["https://a.example/f.zip", "https://a.example/"])).unwrap();
+        let froms = where_froms(&string_array(&[
+            "https://a.example/f.zip",
+            "https://a.example/",
+        ]))
+        .unwrap();
         assert_eq!(froms.len(), 2);
         // A comment is one string object.
         let mut comment = b"bplist00".to_vec();

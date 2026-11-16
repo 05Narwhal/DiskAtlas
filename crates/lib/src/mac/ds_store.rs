@@ -245,7 +245,9 @@ impl DsStore {
         let mut dsdb = None;
         for _ in 0..trees {
             let len = usize::from(root.get(at).copied().unwrap_or(0));
-            let name = root.get(at.saturating_add(1)..).and_then(|rest| rest.get(..len));
+            let name = root
+                .get(at.saturating_add(1)..)
+                .and_then(|rest| rest.get(..len));
             let number = be32(root, at.saturating_add(1).saturating_add(len));
             let (Some(name), Some(number)) = (name, number) else {
                 return Err(truncated(WHAT, u64::from(root_off), 5, len64(root)));
@@ -556,8 +558,10 @@ fn utf16(block: &[u8], at: usize, units: usize) -> Result<String> {
         .and_then(|end| block.get(at..end))
         .ok_or_else(|| truncated(WHAT, at as u64, len as u64, len64(block)))?;
     Ok(char::decode_utf16(
-        raw.chunks_exact(2)
-            .filter_map(|pair| <[u8; 2]>::try_from(pair).ok())
+        raw.as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
             .map(u16::from_be_bytes),
     )
     .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
@@ -584,7 +588,9 @@ fn read_record(block: &[u8], at: usize) -> Result<(Option<Record>, usize)> {
         ));
     }
     let name = utf16(block, at.saturating_add(4), name_units)?;
-    let mut at = at.saturating_add(4).saturating_add(name_units.saturating_mul(2));
+    let mut at = at
+        .saturating_add(4)
+        .saturating_add(name_units.saturating_mul(2));
     let (Some(code), Some(kind)) = (
         block.get(at..).and_then(<[u8]>::first_chunk::<4>).copied(),
         block
@@ -604,13 +610,28 @@ fn read_record(block: &[u8], at: usize) -> Result<(Option<Record>, usize)> {
         b"bool" => (Value::Bool(fixed(1)?.first() != Some(&0)), 1),
         b"long" => (Value::Long(be32(fixed(4)?, 0).unwrap_or(0)), 4),
         b"shor" => (
-            Value::Short(u16::from_be_bytes(*fixed(4)?.get(2..).and_then(<[u8]>::first_chunk::<2>).unwrap_or(&[0; 2]))),
+            Value::Short(u16::from_be_bytes(
+                *fixed(4)?
+                    .get(2..)
+                    .and_then(<[u8]>::first_chunk::<2>)
+                    .unwrap_or(&[0; 2]),
+            )),
             4,
         ),
-        b"type" => (Value::Type(*fixed(4)?.first_chunk::<4>().unwrap_or(&[0; 4])), 4),
+        b"type" => (
+            Value::Type(*fixed(4)?.first_chunk::<4>().unwrap_or(&[0; 4])),
+            4,
+        ),
         b"comp" | b"dutc" => {
             let raw = u64::from_be_bytes(*fixed(8)?.first_chunk::<8>().unwrap_or(&[0; 8]));
-            (if &kind == b"comp" { Value::Comp(raw) } else { Value::Dutc(raw) }, 8)
+            (
+                if &kind == b"comp" {
+                    Value::Comp(raw)
+                } else {
+                    Value::Dutc(raw)
+                },
+                8,
+            )
         }
         b"blob" => {
             let len = to_usize(u64::from(be32(fixed(4)?, 0).unwrap_or(0)));
@@ -719,7 +740,7 @@ pub(crate) mod test_store {
         for block in &blocks {
             let bits = (block.len().max(32)).next_power_of_two().trailing_zeros();
             let size = 1usize << bits;
-            while body.len() % 32 != 0 {
+            while !body.len().is_multiple_of(32) {
                 body.push(0);
             }
             let offset = 32 + body.len();
@@ -740,7 +761,7 @@ pub(crate) mod test_store {
         root.extend_from_slice(&0u32.to_be_bytes());
         root.extend_from_slice(&[0; 32 * 4]);
         let root_bits = root.len().next_power_of_two().trailing_zeros();
-        while body.len() % 32 != 0 {
+        while !body.len().is_multiple_of(32) {
             body.push(0);
         }
         let root_off = 32 + body.len();
@@ -784,7 +805,10 @@ mod tests {
         // Names are compared without regard to case.
         assert_eq!(store.comment("NOTES.TXT"), Some("Hello, é"));
         assert_eq!(store.icon_place("notes.txt"), Some((100, -16)));
-        assert_eq!(store.put_back("Trashed"), Some(("Users/a/Desktop", "Trashed")));
+        assert_eq!(
+            store.put_back("Trashed"),
+            Some(("Users/a/Desktop", "Trashed"))
+        );
         assert_eq!(store.comment("Missing"), None);
         assert_eq!(store.records().count(), 5);
     }
@@ -848,15 +872,25 @@ mod tests {
         assert!(DsStore::parse(b"not a ds_store").is_err());
         assert!(DsStore::parse(&good[..20]).is_err());
         let long_name = "x".repeat(256);
-        assert!(DsStore::parse(&build(&[leaf(&[record(&long_name, b"cmmt", b"ustr", &ustr("a"))])])).is_err());
+        assert!(
+            DsStore::parse(&build(&[leaf(&[record(
+                &long_name,
+                b"cmmt",
+                b"ustr",
+                &ustr("a")
+            )])]))
+            .is_err()
+        );
         // An unknown value type ends the node with an error.
-        assert!(DsStore::parse(&build(&[leaf(&[record("a", b"cmmt", b"zzzz", &[0; 4])])])).is_err());
+        assert!(
+            DsStore::parse(&build(&[leaf(&[record("a", b"cmmt", b"zzzz", &[0; 4])])])).is_err()
+        );
     }
 
     #[test]
     fn random_damage_never_panics() {
         let base = sample();
-        let mut state = 0x0DDB_A11_C0FFEEu64;
+        let mut state = 0x0000_DDBA_11C0_FFEEu64;
         for _ in 0..3000 {
             let mut bytes = base.clone();
             for _ in 0..4 {

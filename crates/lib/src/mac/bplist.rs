@@ -106,10 +106,25 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
         .checked_sub(TRAILER)
         .filter(|&at| at >= MAGIC.len())
     else {
-        return Err(truncated(WHAT, 0, 8 + TRAILER as u64, len64(bytes)));
+        return Err(truncated(
+            WHAT,
+            0,
+            8u64.saturating_add(TRAILER as u64),
+            len64(bytes),
+        ));
     };
-    let offset_size = usize::from(bytes.get(trailer_at.saturating_add(6)).copied().unwrap_or(0));
-    let ref_size = usize::from(bytes.get(trailer_at.saturating_add(7)).copied().unwrap_or(0));
+    let offset_size = usize::from(
+        bytes
+            .get(trailer_at.saturating_add(6))
+            .copied()
+            .unwrap_or(0),
+    );
+    let ref_size = usize::from(
+        bytes
+            .get(trailer_at.saturating_add(7))
+            .copied()
+            .unwrap_or(0),
+    );
     for (field, size) in [("offset size", offset_size), ("reference size", ref_size)] {
         if !matches!(size, 1 | 2 | 4 | 8) {
             return Err(bad(trailer_at as u64, field, size as u64));
@@ -139,7 +154,13 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
         .and_then(|len| table.checked_add(len));
     match table_end {
         Some(end) if table >= MAGIC.len() && end <= trailer_at => {}
-        _ => return Err(bad(trailer_at as u64, "offset table position", table as u64)),
+        _ => {
+            return Err(bad(
+                trailer_at as u64,
+                "offset table position",
+                table as u64,
+            ));
+        }
     }
     let mut reader = Reader {
         bytes,
@@ -199,7 +220,10 @@ impl Reader<'_> {
         let value = self
             .uint(marker_at.saturating_add(1), size)
             .ok_or_else(|| truncated(WHAT, marker_at as u64, size as u64, len64(self.bytes)))?;
-        Ok((to_usize(value), marker_at.saturating_add(1).saturating_add(size)))
+        Ok((
+            to_usize(value),
+            marker_at.saturating_add(1).saturating_add(size),
+        ))
     }
 
     /// `len` bytes at `at`, inside the object area.
@@ -307,8 +331,10 @@ impl Reader<'_> {
                 let len = self.string_len(units, at, 2)?;
                 let raw = self.slice(start, len)?;
                 let units = raw
-                    .chunks_exact(2)
-                    .filter_map(|pair| <[u8; 2]>::try_from(pair).ok())
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
                     .map(u16::from_be_bytes);
                 Ok(Value::String(
                     char::decode_utf16(units)
@@ -319,9 +345,7 @@ impl Reader<'_> {
             (0x8, n) if n <= 7 => {
                 let size = usize::from(n).saturating_add(1);
                 let slice = self.slice(at.saturating_add(1), size)?;
-                let value = slice
-                    .iter()
-                    .fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+                let value = slice.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
                 Ok(Value::Integer(i128::from(value)))
             }
             (0xA | 0xC, n) => {
@@ -337,7 +361,9 @@ impl Reader<'_> {
             }
             (0xD, n) => {
                 let (items, start) = self.count_after(n, at)?;
-                let total = items.checked_mul(2).ok_or_else(|| bad(at as u64, "count", items as u64))?;
+                let total = items
+                    .checked_mul(2)
+                    .ok_or_else(|| bad(at as u64, "count", items as u64))?;
                 let refs = self.refs(start, total)?;
                 let (keys, values) = refs.split_at(items.min(refs.len()));
                 self.enter(number, at)?;
@@ -360,7 +386,11 @@ impl Reader<'_> {
         if self.open.insert(number) {
             Ok(())
         } else {
-            Err(corrupt(WHAT, at as u64, CorruptKind::Loop { what: "container" }))
+            Err(corrupt(
+                WHAT,
+                at as u64,
+                CorruptKind::Loop { what: "container" },
+            ))
         }
     }
 
@@ -386,10 +416,9 @@ impl Reader<'_> {
         let mut out = Vec::with_capacity(n);
         for index in 0..n {
             let at = start.saturating_add(index.saturating_mul(self.ref_size));
-            let number = self
-                .uint(at, self.ref_size)
-                .map(to_usize)
-                .ok_or_else(|| truncated(WHAT, at as u64, self.ref_size as u64, len64(self.bytes)))?;
+            let number = self.uint(at, self.ref_size).map(to_usize).ok_or_else(|| {
+                truncated(WHAT, at as u64, self.ref_size as u64, len64(self.bytes))
+            })?;
             out.push(number);
         }
         Ok(out)
@@ -494,7 +523,13 @@ mod tests {
         let plist = build(&[&text], 2, 2);
         assert_eq!(parse(&plist).unwrap().as_str(), Some("sixteen chars ok"));
         // The same count marker as a four-byte integer (0x12) is accepted; 16-byte (0x14) is not.
-        let bad_marker = build(&[&[0x5F, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, b'x']], 1, 1);
+        let bad_marker = build(
+            &[&[
+                0x5F, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, b'x',
+            ]],
+            1,
+            1,
+        );
         assert!(parse(&bad_marker).is_err());
     }
 
@@ -521,7 +556,13 @@ mod tests {
     fn nesting_past_the_limit_and_hostile_counts_are_errors() {
         // 33 nested arrays: depth 33.
         let objects: Vec<Vec<u8>> = (0..33u8)
-            .map(|i| if i == 32 { vec![0x09] } else { vec![0xA1, i + 1] })
+            .map(|i| {
+                if i == 32 {
+                    vec![0x09]
+                } else {
+                    vec![0xA1, i + 1]
+                }
+            })
             .collect();
         let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
         assert!(parse(&build(&refs, 1, 1)).is_err());

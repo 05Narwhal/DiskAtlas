@@ -294,7 +294,9 @@ pub fn mount(source: Arc<dyn BlockSource>, content: Content) -> Result<Option<Mo
             Ok(Some(Mount::Volume(Arc::new(hfsplus::mount(source)?))))
         }
         Content::Hfs => Ok(Some(Mount::Volume(Arc::new(hfs::mount(source)?)))),
-        Content::ExFat => Ok(Some(Mount::Volume(Arc::new(crate::fs::exfat::mount(source)?)))),
+        Content::ExFat => Ok(Some(Mount::Volume(Arc::new(crate::fs::exfat::mount(
+            source,
+        )?)))),
         Content::Fat => Ok(Some(Mount::Volume(Arc::new(crate::fs::fat::mount(
             source,
         )?)))),

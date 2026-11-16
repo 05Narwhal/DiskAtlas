@@ -74,7 +74,12 @@ pub fn parse_recycle_record(bytes: &[u8]) -> Result<RecycleRecord> {
                 .ok_or_else(|| truncated(WHAT, 24, 4, bytes.len() as u64))?;
             // The notes do not say whether the count includes the closing zero:
             // the first zero unit or the count ends the path, whichever is first.
-            (28, usize::try_from(count).unwrap_or(usize::MAX).min(MAX_V2_UNITS))
+            (
+                28,
+                usize::try_from(count)
+                    .unwrap_or(usize::MAX)
+                    .min(MAX_V2_UNITS),
+            )
         }
         other => {
             return Err(corrupt(
@@ -90,9 +95,11 @@ pub fn parse_recycle_record(bytes: &[u8]) -> Result<RecycleRecord> {
     let units: Vec<u16> = bytes
         .get(start..)
         .unwrap_or_default()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take(limit)
-        .filter_map(|pair| <[u8; 2]>::try_from(pair).ok())
+        .copied()
         .map(u16::from_le_bytes)
         .take_while(|&unit| unit != 0)
         .collect();
@@ -187,7 +194,11 @@ fn parse_local_date(text: &str) -> Option<Timestamp> {
     Some(Timestamp::from_unix(
         days_from_civil(year, month, day)
             .saturating_mul(86_400)
-            .saturating_add(hour * 3600 + minute * 60 + second),
+            .saturating_add(
+                hour.saturating_mul(3600)
+                    .saturating_add(minute.saturating_mul(60))
+                    .saturating_add(second),
+            ),
         0,
     ))
 }
@@ -297,7 +308,12 @@ pub fn find_trash(fs: &dyn FileSystem) -> Vec<TrashFolder> {
         }
     };
     users(find(".Trashes"), TrashKind::Mac, "Trash", "User");
-    users(find("$RECYCLE.BIN"), TrashKind::Windows, "Recycle Bin", "User");
+    users(
+        find("$RECYCLE.BIN"),
+        TrashKind::Windows,
+        "Recycle Bin",
+        "User",
+    );
 
     // A trash folder that is itself the trash.
     for (name, kind, label) in [
@@ -354,12 +370,16 @@ mod tests {
     #[test]
     fn recycle_records_of_both_versions() {
         for version in [1, 2] {
-            let parsed = parse_recycle_record(&record(version, r"C:\Users\a\Résumé.txt", None)).unwrap();
+            let parsed =
+                parse_recycle_record(&record(version, r"C:\Users\a\Résumé.txt", None)).unwrap();
             assert_eq!(parsed.original_path, r"C:\Users\a\Résumé.txt");
             assert_eq!(parsed.size, 1234);
             assert_eq!(parsed.deleted, Timestamp::from_unix(1_767_225_600, 0));
         }
-        assert_eq!(recycle_data_name("$IABC123.txt").as_deref(), Some("$RABC123.txt"));
+        assert_eq!(
+            recycle_data_name("$IABC123.txt").as_deref(),
+            Some("$RABC123.txt")
+        );
         assert_eq!(recycle_data_name("$RABC123.txt"), None);
     }
 
@@ -371,7 +391,9 @@ mod tests {
         assert_eq!(parse_recycle_record(&big).unwrap().original_path, "abc");
         // A count smaller than the text cuts it.
         assert_eq!(
-            parse_recycle_record(&record(2, "abcdef", Some(3))).unwrap().original_path,
+            parse_recycle_record(&record(2, "abcdef", Some(3)))
+                .unwrap()
+                .original_path,
             "abc"
         );
         // Version 3, truncated headers, an empty path.
@@ -380,7 +402,13 @@ mod tests {
         assert!(parse_recycle_record(&record(1, "", None)).is_err());
         // A version 1 path is cut at 260 units.
         let long = "x".repeat(400);
-        assert_eq!(parse_recycle_record(&record(1, &long, None)).unwrap().original_path.len(), 260);
+        assert_eq!(
+            parse_recycle_record(&record(1, &long, None))
+                .unwrap()
+                .original_path
+                .len(),
+            260
+        );
     }
 
     /// A folder tree: (parent, node, name, is folder). Node 1 is the root.
@@ -411,7 +439,11 @@ mod tests {
                         out.push(crate::fs::DirEntry {
                             node: NodeId(node),
                             name,
-                            kind: if folder { NodeKind::Directory } else { NodeKind::File },
+                            kind: if folder {
+                                NodeKind::Directory
+                            } else {
+                                NodeKind::File
+                            },
                             size: None,
                             resource_size: None,
                             modified: None,

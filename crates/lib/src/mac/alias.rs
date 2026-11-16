@@ -89,8 +89,10 @@ fn utf16_tag(data: &[u8]) -> Option<String> {
     Some(
         char::decode_utf16(
             units
-                .chunks_exact(2)
-                .filter_map(|pair| <[u8; 2]>::try_from(pair).ok())
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .copied()
                 .map(u16::from_be_bytes),
         )
         .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
@@ -139,9 +141,9 @@ pub fn parse_alias(record: &[u8]) -> Result<AliasTarget> {
         return Err(truncated(WHAT, 4, size.max(FIXED) as u64, len64(record)));
     }
     let record = record.get(..size).unwrap_or(record);
-    let created = be32(record, 38).filter(|&seconds| seconds != 0).map(|seconds| {
-        Timestamp::from_unix(i64::from(seconds).saturating_sub(MAC_TO_UNIX), 0)
-    });
+    let created = be32(record, 38)
+        .filter(|&seconds| seconds != 0)
+        .map(|seconds| Timestamp::from_unix(i64::from(seconds).saturating_sub(MAC_TO_UNIX), 0));
     let mut target = AliasTarget {
         is_folder: be16(record, 8) == Some(1),
         volume_name: pascal(record, 10, 27),
@@ -210,7 +212,13 @@ pub fn parse_alias(record: &[u8]) -> Result<AliasTarget> {
 
 /// Builds version 2 records for tests and fuzz seeds.
 #[cfg(test)]
-pub(crate) fn build_record(name: &str, volume: &str, parent: u32, node: u32, tags: &[(i16, &[u8])]) -> Vec<u8> {
+pub(crate) fn build_record(
+    name: &str,
+    volume: &str,
+    parent: u32,
+    node: u32,
+    tags: &[(i16, &[u8])],
+) -> Vec<u8> {
     let mut out = vec![0u8; FIXED];
     out[6..8].copy_from_slice(&2u16.to_be_bytes());
     out[10] = volume.len() as u8;
@@ -248,7 +256,10 @@ mod tests {
         assert_eq!(target.parent, NodeId(1234));
         assert_eq!(target.node, NodeId(5678));
         assert!(!target.is_folder && !target.other_volume);
-        assert_eq!(target.volume_created, Some(Timestamp::from_unix(3_000_000_000 - MAC_TO_UNIX, 0)));
+        assert_eq!(
+            target.volume_created,
+            Some(Timestamp::from_unix(3_000_000_000 - MAC_TO_UNIX, 0))
+        );
         assert_eq!(target.path, None);
     }
 
@@ -273,8 +284,17 @@ mod tests {
         assert_eq!(target.path.as_deref(), Some("Disk/Docs/Resume"));
         assert_eq!(target.name, "Résu");
         // Tag 18 wins over tag 2.
-        let record = build_record("x", "Disk", 2, 3, &[(2, b"Disk:x"), (18, b"/Volumes/Disk/x")]);
-        assert_eq!(parse_alias(&record).unwrap().path.as_deref(), Some("/Volumes/Disk/x"));
+        let record = build_record(
+            "x",
+            "Disk",
+            2,
+            3,
+            &[(2, b"Disk:x"), (18, b"/Volumes/Disk/x")],
+        );
+        assert_eq!(
+            parse_alias(&record).unwrap().path.as_deref(),
+            Some("/Volumes/Disk/x")
+        );
     }
 
     #[test]
@@ -285,7 +305,10 @@ mod tests {
         let mut v3 = record.clone();
         v3[6..8].copy_from_slice(&3u16.to_be_bytes());
         assert!(matches!(parse_alias(&v3), Err(Error::Unsupported(text)) if text == NEWER_FORMAT));
-        assert!(matches!(parse_alias(b"book\0\0\0\0"), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            parse_alias(b"book\0\0\0\0"),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -351,6 +374,7 @@ mod fuzz_seeds {
         let tagged = build_record("Name", "Vol", 7, 9, &[(2, b"Vol:Name"), (18, b"/a/b")]);
         assert!(parse_alias(&tagged).is_ok());
         std::fs::write(dir.join("tagged"), tagged).expect("write seed");
-        std::fs::write(dir.join("plain"), build_record("x", "Disk", 2, 3, &[])).expect("write seed");
+        std::fs::write(dir.join("plain"), build_record("x", "Disk", 2, 3, &[]))
+            .expect("write seed");
     }
 }

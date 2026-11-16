@@ -188,7 +188,10 @@ mod tests {
         let parsed = parse(&bytes[..bytes.len().min(MAX_AD_HEADER)], bytes.len() as u64).unwrap();
         assert_eq!(parsed.finder_info, Some(finder));
         let (offset, len) = parsed.resource.unwrap();
-        assert_eq!(&bytes[offset as usize..(offset + len) as usize], b"resource fork bytes");
+        assert_eq!(
+            &bytes[offset as usize..(offset + len) as usize],
+            b"resource fork bytes"
+        );
     }
 
     #[test]

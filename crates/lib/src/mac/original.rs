@@ -215,13 +215,31 @@ mod tests {
     struct Tree(Vec<(u64, N)>);
 
     fn dir(parent: u64, name: &'static str) -> N {
-        N { parent, name, kind: NodeKind::Directory, link: None, alias: None }
+        N {
+            parent,
+            name,
+            kind: NodeKind::Directory,
+            link: None,
+            alias: None,
+        }
     }
     fn file(parent: u64, name: &'static str) -> N {
-        N { parent, name, kind: NodeKind::File, link: None, alias: None }
+        N {
+            parent,
+            name,
+            kind: NodeKind::File,
+            link: None,
+            alias: None,
+        }
     }
     fn symlink(parent: u64, name: &'static str, to: &'static str) -> N {
-        N { parent, name, kind: NodeKind::Symlink, link: Some(to), alias: None }
+        N {
+            parent,
+            name,
+            kind: NodeKind::Symlink,
+            link: Some(to),
+            alias: None,
+        }
     }
 
     impl FileSystem for Tree {
@@ -245,7 +263,11 @@ mod tests {
                 created: None,
                 modified: None,
                 accessed: None,
-                flags: if n.alias.is_some() { EntryFlags::ALIAS } else { EntryFlags::EMPTY },
+                flags: if n.alias.is_some() {
+                    EntryFlags::ALIAS
+                } else {
+                    EntryFlags::EMPTY
+                },
                 link_target: n.link.map(str::to_owned),
                 finder_codes: None,
                 owner: None,
@@ -271,7 +293,10 @@ mod tests {
                 .and_then(|(_, n)| n.alias.clone())
                 .filter(|_| stream == Stream::Resource)
                 .ok_or(Error::NoSuchStream { node: node.0 })?;
-            Ok(Arc::new(MemSource::new(build(&[(*b"alis", vec![(0, None, &alias)])]))))
+            Ok(Arc::new(MemSource::new(build(&[(
+                *b"alis",
+                vec![(0, None, &alias)],
+            )]))))
         }
     }
 
@@ -312,7 +337,10 @@ mod tests {
     fn a_link_to_itself_and_one_leading_out_are_errors_in_words() {
         let fs = Tree(base());
         let loop_error = resolve(&fs, &[], "loop", NodeId(7)).unwrap_err();
-        assert_eq!(loop_error.to_string(), "not supported: This link leads back to itself.");
+        assert_eq!(
+            loop_error.to_string(),
+            "not supported: This link leads back to itself."
+        );
         assert!(resolve(&fs, &[], "outside", NodeId(8)).is_err());
         // A missing target.
         let mut nodes = base();
@@ -327,14 +355,22 @@ mod tests {
         let by_number = build_record("Report", "Disk", 2, 3, &[]);
         let mut elsewhere = build_record("Report", "Archive 2009", 2, 3, &[]);
         elsewhere[130..132].copy_from_slice(&(-1i16).to_be_bytes());
-        for (id, name, record) in [(20, "a", by_path), (21, "b", by_number), (22, "c", elsewhere)] {
+        for (id, name, record) in [
+            (20, "a", by_path),
+            (21, "b", by_number),
+            (22, "c", elsewhere),
+        ] {
             let mut node = file(1, name);
             node.alias = Some(record);
             nodes.push((id, node));
         }
         let fs = Tree(nodes);
         let report = |folder: Vec<(NodeId, String)>| {
-            Resolved::Found(Original { folder, name: "Report".into(), node: NodeId(3) })
+            Resolved::Found(Original {
+                folder,
+                name: "Report".into(),
+                node: NodeId(3),
+            })
         };
         assert_eq!(
             resolve(&fs, &[], "a", NodeId(20)).unwrap(),

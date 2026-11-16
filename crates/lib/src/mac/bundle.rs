@@ -59,7 +59,8 @@ fn extension_matches(name: &str) -> Option<&'static str> {
 /// ([`EntryFlags::PACKAGE`]), or one whose extension is a package's. A file
 /// is never one, whatever its name.
 pub fn is_package(name: &str, kind: NodeKind, flags: EntryFlags) -> bool {
-    kind == NodeKind::Directory && (flags.contains(EntryFlags::PACKAGE) || extension_matches(name).is_some())
+    kind == NodeKind::Directory
+        && (flags.contains(EntryFlags::PACKAGE) || extension_matches(name).is_some())
 }
 
 /// What to call the package `name` in the Kind column: "Application" for
@@ -76,11 +77,22 @@ mod tests {
     fn every_listed_extension_and_the_bundle_bit_make_a_package() {
         for (ext, kind) in PACKAGES {
             let name = format!("Thing.{ext}");
-            assert!(is_package(&name, NodeKind::Directory, EntryFlags::EMPTY), "{name}");
+            assert!(
+                is_package(&name, NodeKind::Directory, EntryFlags::EMPTY),
+                "{name}"
+            );
             assert_eq!(package_kind(&name), *kind);
         }
-        assert!(is_package("Thing.APP", NodeKind::Directory, EntryFlags::EMPTY));
-        assert!(is_package("Plain", NodeKind::Directory, EntryFlags::PACKAGE));
+        assert!(is_package(
+            "Thing.APP",
+            NodeKind::Directory,
+            EntryFlags::EMPTY
+        ));
+        assert!(is_package(
+            "Plain",
+            NodeKind::Directory,
+            EntryFlags::PACKAGE
+        ));
         assert_eq!(package_kind("Plain"), "Package");
     }
 
@@ -89,8 +101,16 @@ mod tests {
         assert!(!is_package("x.app", NodeKind::File, EntryFlags::EMPTY));
         // On a classic file the bundle bit means a BNDL resource.
         assert!(!is_package("Tool", NodeKind::File, EntryFlags::PACKAGE));
-        assert!(!is_package("Documents", NodeKind::Directory, EntryFlags::EMPTY));
+        assert!(!is_package(
+            "Documents",
+            NodeKind::Directory,
+            EntryFlags::EMPTY
+        ));
         assert!(!is_package("app", NodeKind::Directory, EntryFlags::EMPTY));
-        assert!(!is_package("x.apps", NodeKind::Directory, EntryFlags::EMPTY));
+        assert!(!is_package(
+            "x.apps",
+            NodeKind::Directory,
+            EntryFlags::EMPTY
+        ));
     }
 }

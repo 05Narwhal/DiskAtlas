@@ -164,7 +164,11 @@ impl ResourceMap {
                 // The last three bytes of `packed` are the data offset: byte 4 is the attributes.
                 let data_offset = packed & 0x00FF_FFFF;
                 if u64::from(data_offset).saturating_add(4) > data_len {
-                    return Err(invalid(at as u64, "resource data offset", u64::from(data_offset)));
+                    return Err(invalid(
+                        at as u64,
+                        "resource data offset",
+                        u64::from(data_offset),
+                    ));
                 }
                 entries.push(Entry {
                     kind,
@@ -175,7 +179,10 @@ impl ResourceMap {
             }
         }
         entries.sort_by_key(|entry| (entry.kind, entry.id));
-        let names = map.get(name_list.min(map.len())..).unwrap_or_default().to_vec();
+        let names = map
+            .get(name_list.min(map.len())..)
+            .unwrap_or_default()
+            .to_vec();
         Ok(Self {
             entries,
             data_start: data_off,
@@ -339,17 +346,29 @@ mod tests {
     #[test]
     fn two_types_and_a_named_resource() {
         let fork = open(build(&[
-            (*b"STR ", vec![(128, Some("Greeting"), b"hello"), (-1, None, b"")]),
+            (
+                *b"STR ",
+                vec![(128, Some("Greeting"), b"hello"), (-1, None, b"")],
+            ),
             (*b"alis", vec![(0, None, b"ALIAS")]),
         ]));
         let map = ResourceMap::read(&fork).unwrap();
-        assert_eq!(map.types().collect::<Vec<_>>(), [(*b"STR ", 2), (*b"alis", 1)]);
+        assert_eq!(
+            map.types().collect::<Vec<_>>(),
+            [(*b"STR ", 2), (*b"alis", 1)]
+        );
         assert_eq!(map.ids(*b"STR ").collect::<Vec<_>>(), [-1, 128]);
         assert_eq!(map.name(*b"STR ", 128).as_deref(), Some("Greeting"));
         assert_eq!(map.name(*b"STR ", -1), None);
-        assert_eq!(map.load(&fork, *b"STR ", 128, 100).unwrap().unwrap(), b"hello");
+        assert_eq!(
+            map.load(&fork, *b"STR ", 128, 100).unwrap().unwrap(),
+            b"hello"
+        );
         assert_eq!(map.load(&fork, *b"STR ", -1, 100).unwrap().unwrap(), b"");
-        assert_eq!(map.load(&fork, *b"alis", 0, 100).unwrap().unwrap(), b"ALIAS");
+        assert_eq!(
+            map.load(&fork, *b"alis", 0, 100).unwrap().unwrap(),
+            b"ALIAS"
+        );
         assert!(map.load(&fork, *b"nope", 0, 100).unwrap().is_none());
         // Longer than the caller allows.
         assert!(map.load(&fork, *b"STR ", 128, 3).is_err());
@@ -382,7 +401,8 @@ mod tests {
         // A reference list that points outside the map.
         let map_off = u32::from_be_bytes(good[4..8].try_into().unwrap()) as usize;
         let mut outside = good.clone();
-        outside[map_off + 28 + 2 + 6..map_off + 28 + 2 + 8].copy_from_slice(&0xFFF0u16.to_be_bytes());
+        outside[map_off + 28 + 2 + 6..map_off + 28 + 2 + 8]
+            .copy_from_slice(&0xFFF0u16.to_be_bytes());
         assert!(read(outside).is_err());
         // A resource whose data offset is past the data.
         let mut far = good.clone();
@@ -444,7 +464,10 @@ mod fuzz_seeds {
         let dir = std::path::Path::new(&root).join("resource_map");
         std::fs::create_dir_all(&dir).expect("create seed directory");
         let fork = build(&[
-            (*b"STR ", vec![(128, Some("Greeting"), b"hello"), (-1, None, b"")]),
+            (
+                *b"STR ",
+                vec![(128, Some("Greeting"), b"hello"), (-1, None, b"")],
+            ),
             (*b"alis", vec![(0, None, b"ALIAS")]),
         ]);
         assert!(super::ResourceMap::read(&crate::io::block::MemSource::new(fork.clone())).is_ok());
