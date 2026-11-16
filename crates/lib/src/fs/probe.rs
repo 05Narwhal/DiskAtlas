@@ -306,11 +306,13 @@ pub fn mount(source: Arc<dyn BlockSource>, content: Content) -> Result<Option<Mo
         Content::Udf => Ok(Some(Mount::Volume(Arc::new(crate::fs::udf::mount(
             source,
         )?)))),
+        Content::Ext => Ok(Some(Mount::Volume(Arc::new(crate::fs::ext::mount(
+            source,
+        )?)))),
         Content::Apfs
         | Content::Mfs
         | Content::CoreStorage
         | Content::Ntfs
-        | Content::Ext
         | Content::Empty
         | Content::Unknown => Ok(None),
     }

@@ -15,10 +15,14 @@ repository = "https://github.com/05Narwhal/DiskAtlas"
 homepage = "https://github.com/05Narwhal/DiskAtlas"
 
 # Dependency policy: every version is declared here once and crates opt in
-# with `workspace = true`. A new entry needs the main session's approval, a
+# with `workspace = true`. A new entry needs the lead session's judgment (no sign-off from Julian since 2026-11-16), a
 # GPL-3.0-or-later compatible license, and a use in the same change.
 [workspace.dependencies]
 disk-atlas-lib = { path = "crates/lib" }
+
+# ext2/3/4 reader (lead session, 2026-11-16; MIT OR Apache-2.0, 1.0.0 released
+# 2026-09-14, no unsafe, reads through its own positional-read trait).
+ext4-view = "1"
 
 # UI framework. Pinned exactly: the GPUI API changes between releases.
 gpui = "=0.2.2"

@@ -33,6 +33,7 @@ use crate::io::block::BlockSource;
 
 pub mod apfs;
 pub mod exfat;
+pub mod ext;
 pub mod fat;
 pub mod hfs;
 pub mod hfsplus;

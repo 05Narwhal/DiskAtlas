@@ -194,3 +194,10 @@ path = "fuzz_targets/udf_mount.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ext_mount"
+path = "fuzz_targets/ext_mount.rs"
+test = false
+doc = false
+bench = false

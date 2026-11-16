@@ -37,7 +37,7 @@ A new raw-byte parser gets a target in `fuzz/fuzz_targets/` and, when it has a v
 4. **Nothing blocks the UI thread.** All disk and filesystem work runs on background executors and reaches the UI in batches.
 5. **Fast is a measurement.** A performance claim needs a benchmark or a traced timing. Budgets are in `.claude/docs/performance.md`.
 6. **GPUI from source, not from memory.** The GPUI API changes between releases. Before writing GPUI code, read the pinned version's source under `~/.cargo/registry/src/*/gpui-*` or its examples. Do not guess signatures.
-7. **No new dependency without the main session's approval.** It must be compatible with GPL-3.0-or-later, maintained, and worth its compile time.
+7. **New dependencies: the lead session may add them without asking Julian (Julian, 2026-11-16).** It must be compatible with GPL-3.0-or-later, maintained (a release within 18 months), and worth its compile time; record each one in `Cargo.toml` with a comment and report it.
 8. Every Rust source file starts with the GPL header used in `crates/lib/src/lib.rs`.
 9. Do not commit or push unless Julian asks. Work happens on `dev`.
 
