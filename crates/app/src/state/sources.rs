@@ -24,13 +24,17 @@
 //! that decide what a disk contains ([`lay_out`], [`prepare`]) are plain and GPUI-free so they can
 //! be tested with in-memory disks.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use disk_atlas_lib::error::{Error, Result as EngineResult};
 use disk_atlas_lib::fs::native::{self, NativeFs};
-use disk_atlas_lib::fs::probe::{Content, Mount, mount as mount_content, probe as probe_content};
-use disk_atlas_lib::fs::{DirStream, FileSystem, Metadata, NodeId, VolumeInfo};
+use disk_atlas_lib::fs::probe::{
+    ContainerVolume, Content, Mount, VolumeRole, VolumeState, mount as mount_content,
+    probe as probe_content,
+};
+use disk_atlas_lib::fs::{DirStream, FileSystem, Metadata, NodeId, SnapshotInfo, VolumeInfo};
 use disk_atlas_lib::image;
 use disk_atlas_lib::io::block::{BlockSource, Slice};
 use disk_atlas_lib::io::cache::{CachedSource, ChunkCache, DEFAULT_BUDGET};
@@ -239,6 +243,89 @@ pub struct Source {
     pub availability: Availability,
     /// Set for a partition the computer needs rather than a person (EFI, boot, reserved).
     pub system: Option<SystemKind>,
+    /// What a volume of a container (APFS) is for, when the container says. The sidebar orders
+    /// and dims by it; it never decides what can be read.
+    pub role: Option<VolumeRole>,
+    /// Set for an earlier state of a volume, opened from its snapshot row. Such a source is not
+    /// one of its disk's `volumes`: the sidebar lists it under its volume.
+    pub snapshot: Option<SnapshotOf>,
+}
+
+/// What a snapshot source shows: an earlier state of `volume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotOf {
+    /// The volume it is a snapshot of.
+    pub volume: SourceId,
+    /// The snapshot's id on that volume.
+    pub id: u64,
+}
+
+/// `snapshots` newest first; one without a date last. Ties keep the higher id first.
+fn newest_first(mut snapshots: Vec<SnapshotInfo>) -> Vec<SnapshotInfo> {
+    snapshots.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    snapshots
+}
+
+/// Where a volume of a container goes among its siblings: Data and volumes without a role first,
+/// then System, then Preboot, Recovery and VM (design/m7-apfs.md §8).
+pub fn role_rank(role: Option<VolumeRole>) -> u8 {
+    match role {
+        Some(VolumeRole::System) => 1,
+        Some(VolumeRole::Preboot) => 2,
+        Some(VolumeRole::Recovery) => 3,
+        Some(VolumeRole::Vm) => 4,
+        // `VolumeRole` is non-exhaustive: a role the app does not know yet is listed like Data.
+        None | Some(VolumeRole::Data | _) => 0,
+    }
+}
+
+/// True for the roles the sidebar dims, because they are rarely what anyone wants: Preboot,
+/// Recovery and VM.
+pub fn is_quiet_role(role: Option<VolumeRole>) -> bool {
+    role_rank(role) >= 2
+}
+
+/// The volumes of one disk that lie on the same bytes: the volumes of one container, or a volume
+/// alone in its partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    /// Byte offset on the disk.
+    pub start: u64,
+    /// Length in bytes.
+    pub len: u64,
+    /// The volumes, in sidebar order. Never empty.
+    pub volumes: Vec<SourceId>,
+}
+
+impl Span {
+    /// The volume that stands for the span: `current` when it is one of them, else the first.
+    pub fn lead(&self, current: Option<SourceId>) -> Option<SourceId> {
+        current
+            .filter(|id| self.volumes.contains(id))
+            .or_else(|| self.volumes.first().copied())
+    }
+
+    /// True when `id` is one of the span's volumes.
+    pub fn holds(&self, id: Option<SourceId>) -> bool {
+        id.is_some_and(|id| self.volumes.contains(&id))
+    }
+}
+
+/// Groups `(source, start, len)` volumes, in disk order, into spans: neighbours on the same bytes
+/// are one span. The volumes of a container are added next to each other, so they meet here.
+fn group_spans(volumes: &[(SourceId, u64, u64)]) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::with_capacity(volumes.len());
+    for &(id, start, len) in volumes {
+        match spans.last_mut() {
+            Some(span) if span.start == start && span.len == len => span.volumes.push(id),
+            _ => spans.push(Span {
+                start,
+                len,
+                volumes: vec![id],
+            }),
+        }
+    }
+    spans
 }
 
 /// A physical disk or an opened disk image, and the sources it holds.
@@ -341,18 +428,26 @@ struct PreparedVolume {
     availability: Availability,
     /// The Trash and Desktop folders that hold something (R17.4), found at mount time.
     trash: Vec<TrashFolder>,
+    /// What the volume is for, when it is one of a container's.
+    role: Option<VolumeRole>,
+}
+
+/// The words for a volume that failed to mount.
+fn mount_failure(error: &Error) -> Availability {
+    Availability::Failed(format!("This volume could not be read ({error}).").into())
 }
 
 /// Mounts the volume `plan` describes when a reader exists for its format. A mounted volume
-/// takes the volume's own name when it has one. Blocking.
-fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> PreparedVolume {
+/// takes the volume's own name when it has one. A container gives one volume per volume in it,
+/// all on the partition's bytes, in sidebar order. Blocking.
+fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Vec<PreparedVolume> {
     let volume = if plan.start == 0 && plan.len == source.len() {
         Ok(Arc::clone(source))
     } else {
         Slice::new(Arc::clone(source), plan.start, plan.len)
             .map(|slice| Arc::new(slice) as Arc<dyn BlockSource>)
     };
-    match volume.and_then(|volume| mount_content(volume, plan.content)) {
+    let one = match volume.and_then(|volume| mount_content(volume, plan.content)) {
         Ok(Some(Mount::Volume(fs))) => {
             let name = fs.info().name;
             if !name.trim().is_empty() {
@@ -364,10 +459,11 @@ fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Prepared
                 fs: Some(fs),
                 availability: Availability::Browsable,
                 trash,
+                role: None,
             }
         }
-        // A container's volumes become one source each in M7 (design/m7-apfs.md §8); no reader
-        // returns one before then. `Mount` is non-exhaustive, hence the wildcard.
+        Ok(Some(Mount::Container(volumes))) => return container_volumes(&plan, volumes),
+        // `Mount` is non-exhaustive, hence the wildcard.
         Ok(None | Some(_)) => PreparedVolume {
             availability: Availability::Unsupported {
                 format: SharedString::from(plan.format),
@@ -375,16 +471,72 @@ fn mount_volume(source: &Arc<dyn BlockSource>, mut plan: VolumePlan) -> Prepared
             plan,
             fs: None,
             trash: Vec::new(),
+            role: None,
         },
         Err(error) => PreparedVolume {
-            availability: Availability::Failed(
-                format!("This volume could not be read ({error}).").into(),
-            ),
+            availability: mount_failure(&error),
             plan,
             fs: None,
             trash: Vec::new(),
+            role: None,
         },
+    };
+    vec![one]
+}
+
+/// The volumes of a container on the partition `plan` describes, Data first (see [`role_rank`]).
+/// A volume without a name takes the partition's label. An empty container is one failed entry,
+/// so the partition does not vanish from the sidebar.
+fn container_volumes(plan: &VolumePlan, volumes: Vec<ContainerVolume>) -> Vec<PreparedVolume> {
+    if volumes.is_empty() {
+        return vec![PreparedVolume {
+            plan: plan.clone(),
+            fs: None,
+            availability: Availability::Failed("This container holds no volumes.".into()),
+            trash: Vec::new(),
+            role: None,
+        }];
     }
+    let mut prepared: Vec<PreparedVolume> = volumes
+        .into_iter()
+        .map(|volume| {
+            let mut plan = plan.clone();
+            let name = volume.name.trim();
+            if !name.is_empty() {
+                plan.label = name.to_owned();
+            }
+            let (fs, availability) = match volume.state {
+                VolumeState::Ready(fs) => (Some(fs), Availability::Browsable),
+                // The unlock screen is M7 task 14; until then a locked volume says what it is.
+                VolumeState::Locked(_) => (
+                    None,
+                    Availability::Failed(
+                        "This volume is encrypted. Disk Atlas cannot unlock it yet.".into(),
+                    ),
+                ),
+                VolumeState::Failed(error) => (None, mount_failure(&error)),
+                // `VolumeState` is non-exhaustive.
+                _ => (
+                    None,
+                    Availability::Failed("This volume cannot be read yet.".into()),
+                ),
+            };
+            let trash = fs
+                .as_ref()
+                .map(|fs| find_trash(fs.as_ref()))
+                .unwrap_or_default();
+            PreparedVolume {
+                plan,
+                fs,
+                availability,
+                trash,
+                role: volume.role,
+            }
+        })
+        .collect();
+    // Stable: volumes of one rank keep the container's order.
+    prepared.sort_by_key(|volume| role_rank(volume.role));
+    prepared
 }
 
 /// What a disk's bytes say it holds.
@@ -521,7 +673,7 @@ fn prepare(found: Found, opened: Result<Arc<dyn BlockSource>, Availability>) -> 
                 volumes: layout
                     .volumes
                     .into_iter()
-                    .map(|plan| mount_volume(&source, plan))
+                    .flat_map(|plan| mount_volume(&source, plan))
                     .collect(),
                 whole: layout.failure,
             }
@@ -643,6 +795,12 @@ pub struct Sources {
     next_disk: u32,
     /// The one chunk cache every device and image reads through.
     cache: Arc<ChunkCache>,
+    /// The snapshots of each volume that has any, newest first. Asked once, after mounting.
+    snapshots: HashMap<SourceId, Arc<[SnapshotInfo]>>,
+    /// The source of each snapshot opened so far, by (volume, snapshot id): kept for the session.
+    snapshot_sources: HashMap<(SourceId, u64), SourceId>,
+    /// Counts snapshot openings; only the latest selects its source when it is ready.
+    snapshot_request: u64,
     _tasks: Vec<Task<()>>,
 }
 
@@ -736,6 +894,9 @@ impl Sources {
             next_id: 0,
             next_disk: 0,
             cache,
+            snapshots: HashMap::new(),
+            snapshot_sources: HashMap::new(),
+            snapshot_request: 0,
             _tasks: vec![home_task, roots_task, disks_task, volumes_task],
         }
     }
@@ -753,6 +914,20 @@ impl Sources {
     /// The disk called `id`.
     pub fn disk(&self, id: DiskId) -> Option<&Disk> {
         self.disks.iter().find(|disk| disk.id == id)
+    }
+
+    /// The volumes of `disk` by the bytes they lie on, in map order: the volumes of a container
+    /// are one span. Empty for a disk that failed as a whole.
+    pub fn spans(&self, disk: &Disk) -> Vec<Span> {
+        let volumes: Vec<(SourceId, u64, u64)> = disk
+            .volumes
+            .iter()
+            .filter_map(|&id| match self.source(id)?.kind {
+                SourceKind::Volume { start, len, .. } => Some((id, start, len)),
+                SourceKind::Host | SourceKind::WholeDisk { .. } => None,
+            })
+            .collect();
+        group_spans(&volumes)
     }
 
     /// Adds the host folder `path` as a source, as the startup tasks do for a drive. For the
@@ -818,6 +993,153 @@ impl Sources {
     /// The source called `id`.
     pub fn source(&self, id: SourceId) -> Option<&Source> {
         self.items.iter().find(|source| source.id == id)
+    }
+
+    /// The volume `id` stands for on its disk: the live volume of a snapshot, else `id` itself.
+    pub fn live_volume(&self, id: SourceId) -> SourceId {
+        self.source(id)
+            .and_then(|source| source.snapshot)
+            .map_or(id, |snapshot| snapshot.volume)
+    }
+
+    /// The snapshots of `volume`, newest first, once listed. `None` when it has none.
+    pub fn snapshots(&self, volume: SourceId) -> Option<&Arc<[SnapshotInfo]>> {
+        self.snapshots.get(&volume)
+    }
+
+    /// The source of snapshot `id` of `volume`, when it has been opened.
+    pub fn snapshot_source(&self, volume: SourceId, id: u64) -> Option<SourceId> {
+        self.snapshot_sources.get(&(volume, id)).copied()
+    }
+
+    /// Opens snapshot `id` of `volume` in the background as a source of its own, then
+    /// [`SourcesEvent::Selected`] names it. One already opened is selected at once. When the user
+    /// picks another snapshot before this one is ready, this one is kept but not selected.
+    pub fn open_snapshot(&mut self, volume: SourceId, id: u64, cx: &mut Context<Self>) {
+        self.snapshot_request = self.snapshot_request.wrapping_add(1);
+        if let Some(existing) = self.snapshot_source(volume, id) {
+            cx.emit(SourcesEvent::Selected(existing));
+            return;
+        }
+        let Some(parent) = self.source(volume).cloned() else {
+            return;
+        };
+        let request = self.snapshot_request;
+        let fs = Arc::clone(&parent.fs);
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { fs.open_snapshot(id) })
+                .await;
+            this.update(cx, |this, cx| {
+                // The same snapshot asked twice while it opened: the first one in wins.
+                let added = match this.snapshot_source(volume, id) {
+                    Some(existing) => existing,
+                    None => this.add_snapshot(&parent, id, opened),
+                };
+                cx.emit(SourcesEvent::Changed);
+                if this.snapshot_request == request {
+                    cx.emit(SourcesEvent::Selected(added));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Adds the source of snapshot `id` of `parent`: browsable when it opened, else failed with
+    /// the reason, so selecting it says what went wrong.
+    fn add_snapshot(
+        &mut self,
+        parent: &Source,
+        id: u64,
+        opened: EngineResult<Arc<dyn FileSystem>>,
+    ) -> SourceId {
+        let source_id = self.next_source_id();
+        let name = self
+            .snapshots(parent.id)
+            .and_then(|list| list.iter().find(|snapshot| snapshot.id == id))
+            .map_or_else(
+                || format!("snapshot {id}"),
+                |snapshot| snapshot.name.clone(),
+            );
+        let (fs, availability, label) = match opened {
+            Ok(fs) => {
+                let label = fs.info().name;
+                (fs, Availability::Browsable, label)
+            }
+            Err(error) => {
+                let label = format!("{} \u{2014} {name}", parent.label);
+                (
+                    Unavailable::arc(&label),
+                    Availability::Failed(
+                        format!("This snapshot could not be read ({error}).").into(),
+                    ),
+                    label,
+                )
+            }
+        };
+        self.items.push(Source {
+            id: source_id,
+            group: parent.group,
+            label: SharedString::from(label),
+            format: parent.format.clone(),
+            fs,
+            kind: parent.kind,
+            availability,
+            system: parent.system,
+            role: parent.role,
+            snapshot: Some(SnapshotOf {
+                volume: parent.id,
+                id,
+            }),
+        });
+        self.snapshot_sources.insert((parent.id, id), source_id);
+        source_id
+    }
+
+    /// Asks every browsable volume in `volumes` for its snapshots, on the background executor,
+    /// and records the ones that have any in one update.
+    fn list_snapshots(&mut self, volumes: &[SourceId], cx: &mut Context<Self>) {
+        let asked: Vec<(SourceId, Arc<dyn FileSystem>)> = volumes
+            .iter()
+            .filter_map(|&id| self.source(id))
+            .filter(|source| source.availability.is_browsable())
+            .map(|source| (source.id, Arc::clone(&source.fs)))
+            .collect();
+        if asked.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    asked
+                        .into_iter()
+                        .filter_map(|(id, fs)| match fs.snapshots() {
+                            Ok(list) if !list.is_empty() => Some((id, newest_first(list))),
+                            Ok(_) => None,
+                            Err(error) => {
+                                tracing::debug!(%error, "could not list a volume's snapshots");
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            if found.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                for (id, list) in found {
+                    this.snapshots.insert(id, list.into());
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Opens the disk image at `path` in the background and adds it to Disk images; then
@@ -890,6 +1212,7 @@ impl Sources {
             fs,
             availability,
             trash,
+            role,
         } in volumes
         {
             let id = self.next_source_id();
@@ -919,6 +1242,8 @@ impl Sources {
                 },
                 availability,
                 system: plan.system,
+                role,
+                snapshot: None,
             });
         }
         let whole = whole.map(|availability| {
@@ -932,6 +1257,8 @@ impl Sources {
                 kind: SourceKind::WholeDisk { disk },
                 availability,
                 system: None,
+                role: None,
+                snapshot: None,
             });
             id
         });
@@ -947,6 +1274,12 @@ impl Sources {
             whole,
         });
         let first = self.disks.last().and_then(Disk::first_source);
+        let listed = self
+            .disks
+            .last()
+            .map(|disk| disk.volumes.clone())
+            .unwrap_or_default();
+        self.list_snapshots(&listed, cx);
         cx.emit(SourcesEvent::Changed);
         cx.notify();
         first
@@ -971,6 +1304,8 @@ impl Sources {
                 kind: SourceKind::Host,
                 availability: Availability::Browsable,
                 system: None,
+                role: None,
+                snapshot: None,
             });
         }
         if self.items.len() != before {
@@ -1399,6 +1734,267 @@ mod tests {
             text.starts_with("This volume could not be read ("),
             "{text}"
         );
+    }
+
+    fn apfs_plan() -> VolumePlan {
+        VolumePlan {
+            label: "Container disk2".into(),
+            start: 4096,
+            len: 1 << 30,
+            format: "APFS",
+            content: Content::Apfs,
+            system: None,
+        }
+    }
+
+    #[test]
+    fn a_container_gives_one_volume_each_data_first() {
+        let ready = |name: &str, role| {
+            ContainerVolume::new(name, role, VolumeState::Ready(Unavailable::arc(name)))
+        };
+        let volumes = vec![
+            ready("Macintosh HD", Some(VolumeRole::System)),
+            ready("Preboot", Some(VolumeRole::Preboot)),
+            ready("Macintosh HD - Data", Some(VolumeRole::Data)),
+            ContainerVolume::new(
+                "VM",
+                Some(VolumeRole::Vm),
+                VolumeState::Failed(Error::unsupported("encrypted volume")),
+            ),
+            ready("  ", None),
+        ];
+        let prepared = container_volumes(&apfs_plan(), volumes);
+        let rows: Vec<_> = prepared
+            .iter()
+            .map(|v| (v.plan.label.as_str(), v.role, v.availability.is_browsable()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Macintosh HD - Data", Some(VolumeRole::Data), true),
+                // No name: the partition's label.
+                ("Container disk2", None, true),
+                ("Macintosh HD", Some(VolumeRole::System), true),
+                ("Preboot", Some(VolumeRole::Preboot), true),
+                ("VM", Some(VolumeRole::Vm), false),
+            ]
+        );
+        // Every volume lies on the partition's bytes and keeps its format.
+        assert!(
+            prepared
+                .iter()
+                .all(|v| v.plan.start == 4096 && v.plan.len == 1 << 30 && v.plan.format == "APFS")
+        );
+        assert!(prepared[..4].iter().all(|v| v.fs.is_some()));
+        let Availability::Failed(text) = &prepared[4].availability else {
+            panic!("expected a failure");
+        };
+        assert!(
+            text.starts_with("This volume could not be read ("),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_container_stays_listed_as_a_failure() {
+        let prepared = container_volumes(&apfs_plan(), Vec::new());
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].plan, apfs_plan());
+        assert_eq!(
+            prepared[0].availability,
+            Availability::Failed("This container holds no volumes.".into())
+        );
+    }
+
+    #[test]
+    fn quiet_roles_are_preboot_recovery_and_vm() {
+        assert!(!is_quiet_role(None));
+        assert!(!is_quiet_role(Some(VolumeRole::Data)));
+        assert!(!is_quiet_role(Some(VolumeRole::System)));
+        assert!(is_quiet_role(Some(VolumeRole::Preboot)));
+        assert!(is_quiet_role(Some(VolumeRole::Recovery)));
+        assert!(is_quiet_role(Some(VolumeRole::Vm)));
+    }
+
+    #[test]
+    fn volumes_on_the_same_bytes_are_one_span() {
+        let id = SourceId::for_test;
+        let spans = group_spans(&[
+            (id(0), 0, 100),
+            (id(1), 100, 900),
+            (id(2), 100, 900),
+            (id(3), 100, 900),
+            (id(4), 1000, 50),
+        ]);
+        assert_eq!(
+            spans,
+            vec![
+                Span {
+                    start: 0,
+                    len: 100,
+                    volumes: vec![id(0)]
+                },
+                Span {
+                    start: 100,
+                    len: 900,
+                    volumes: vec![id(1), id(2), id(3)]
+                },
+                Span {
+                    start: 1000,
+                    len: 50,
+                    volumes: vec![id(4)]
+                },
+            ]
+        );
+        let shared = &spans[1];
+        // The current volume leads its span; otherwise the first in sidebar order.
+        assert_eq!(shared.lead(Some(id(3))), Some(id(3)));
+        assert_eq!(shared.lead(Some(id(0))), Some(id(1)));
+        assert_eq!(shared.lead(None), Some(id(1)));
+        assert!(shared.holds(Some(id(2))));
+        assert!(!shared.holds(Some(id(4))) && !shared.holds(None));
+        assert!(group_spans(&[]).is_empty());
+    }
+
+    /// A volume with three snapshots, of which only 7 opens.
+    struct Snapshotted;
+
+    impl FileSystem for Snapshotted {
+        fn info(&self) -> VolumeInfo {
+            VolumeInfo::new("Data")
+        }
+
+        fn root(&self) -> NodeId {
+            NodeId(0)
+        }
+
+        fn metadata(&self, _node: NodeId) -> EngineResult<Metadata> {
+            Err(cannot_read_yet())
+        }
+
+        fn lookup(&self, _dir: NodeId, _name: &str) -> EngineResult<Option<NodeId>> {
+            Err(cannot_read_yet())
+        }
+
+        fn read_dir(&self, _dir: NodeId) -> EngineResult<Box<dyn DirStream>> {
+            Err(cannot_read_yet())
+        }
+
+        fn snapshots(&self) -> EngineResult<Vec<SnapshotInfo>> {
+            let snap = |id, name: &str, at: Option<i64>| SnapshotInfo {
+                id,
+                name: name.to_owned(),
+                created: at.map(|seconds| disk_atlas_lib::fs::Timestamp::from_unix(seconds, 0)),
+            };
+            Ok(vec![
+                snap(3, "old", Some(100)),
+                snap(5, "undated", None),
+                snap(7, "new", Some(200)),
+            ])
+        }
+
+        fn open_snapshot(&self, id: u64) -> EngineResult<Arc<dyn FileSystem>> {
+            if id == 7 {
+                Ok(Unavailable::arc("Data \u{2014} new"))
+            } else {
+                Err(Error::unsupported("a snapshot that holds no data"))
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn snapshots_list_newest_first_and_open_as_sources(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        cx.executor().allow_parking();
+        let sources = cx.new(Sources::new);
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let selected = Rc::clone(&selected);
+            cx.subscribe(&sources, move |_, event: &SourcesEvent, _| {
+                if let SourcesEvent::Selected(id) = event {
+                    selected.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+        });
+        let volume = sources
+            .update(cx, |sources, cx| {
+                sources.add_disk(
+                    PreparedDisk {
+                        found: found(SourceGroup::DiskImages),
+                        scheme: None,
+                        volumes: vec![PreparedVolume {
+                            plan: apfs_plan(),
+                            fs: Some(Arc::new(Snapshotted)),
+                            availability: Availability::Browsable,
+                            trash: Vec::new(),
+                            role: Some(VolumeRole::Data),
+                        }],
+                        whole: None,
+                    },
+                    cx,
+                )
+            })
+            .expect("the disk has a volume");
+        selected.borrow_mut().clear();
+        cx.run_until_parked();
+        let listed = cx.update(|cx| {
+            sources
+                .read(cx)
+                .snapshots(volume)
+                .map(|list| list.iter().map(|s| s.id).collect::<Vec<_>>())
+        });
+        assert_eq!(listed, Some(vec![7, 3, 5]), "newest first, undated last");
+
+        // Two picks in a row: both are kept, only the second is shown.
+        sources.update(cx, |sources, cx| {
+            sources.open_snapshot(volume, 3, cx);
+            sources.open_snapshot(volume, 7, cx);
+        });
+        cx.run_until_parked();
+        let (failed, opened) = cx.update(|cx| {
+            let sources = sources.read(cx);
+            (
+                sources.snapshot_source(volume, 3).expect("3 is kept"),
+                sources.snapshot_source(volume, 7).expect("7 is kept"),
+            )
+        });
+        assert_eq!(*selected.borrow(), vec![opened]);
+        cx.update(|cx| {
+            let sources = sources.read(cx);
+            let new = sources.source(opened).unwrap();
+            assert_eq!(new.label.as_ref(), "Data \u{2014} new");
+            assert!(new.availability.is_browsable());
+            assert_eq!(new.snapshot, Some(SnapshotOf { volume, id: 7 }));
+            assert_eq!(new.kind, sources.source(volume).unwrap().kind);
+            assert_eq!(sources.live_volume(opened), volume);
+            assert_eq!(sources.live_volume(volume), volume);
+            let old = sources.source(failed).unwrap();
+            assert_eq!(old.label.as_ref(), "Container disk2 \u{2014} old");
+            let Availability::Failed(text) = &old.availability else {
+                panic!("expected a failure");
+            };
+            assert!(
+                text.starts_with("This snapshot could not be read ("),
+                "{text}"
+            );
+            // Snapshots are not volumes of the disk: no row and no span of their own.
+            let disk = sources
+                .disks()
+                .iter()
+                .find(|disk| disk.volumes.contains(&volume))
+                .unwrap();
+            assert_eq!(disk.volumes, vec![volume]);
+        });
+
+        // Asked again: the same source, selected at once.
+        let count = cx.update(|cx| sources.read(cx).items().len());
+        sources.update(cx, |sources, cx| sources.open_snapshot(volume, 3, cx));
+        assert_eq!(selected.borrow().last(), Some(&failed));
+        assert_eq!(cx.update(|cx| sources.read(cx).items().len()), count);
     }
 
     #[test]

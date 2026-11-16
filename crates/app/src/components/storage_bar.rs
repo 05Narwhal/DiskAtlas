@@ -579,6 +579,19 @@ struct PartInfo {
     current: bool,
     bytes: u64,
     used: Option<u64>,
+    /// How many volumes lie on the part's bytes: the volumes of one container share them.
+    shared: usize,
+}
+
+impl PartInfo {
+    /// What the tooltip and the keyboard walk say: "Data, 1 GB used of 2 GB", and when the
+    /// part is a container's, ". 3 volumes share this space" after it.
+    fn spoken(&self) -> String {
+        match disk_strip::shared_note(self.shared) {
+            Some(note) => format!("{}, {}. {note}", self.name, self.caption),
+            None => format!("{}, {}", self.name, self.caption),
+        }
+    }
 }
 
 /// What the right end of the first line says besides a selection.
@@ -873,6 +886,7 @@ impl StorageBar {
                         current: true,
                         bytes: total,
                         used: Some(used),
+                        shared: 1,
                     }],
                     bars: vec![BarPartition {
                         bytes: total,
@@ -897,6 +911,7 @@ impl StorageBar {
                         current: true,
                         bytes: disk.size,
                         used: None,
+                        shared: 1,
                     }],
                     bars: vec![BarPartition {
                         bytes: disk.size,
@@ -911,15 +926,19 @@ impl StorageBar {
             }
             SourceKind::Volume { disk, .. } => {
                 let disk = sources.disk(disk)?;
-                let volumes: Vec<(SourceId, u64, u64)> = disk
-                    .volumes
+                // A snapshot being browsed is drawn as its volume, which lies on the same bytes.
+                let live = sources.live_volume(current);
+                // The volumes of a container share a partition: one part, standing for the
+                // current volume when it is one of them.
+                let volumes: Vec<(SourceId, u64, u64, usize)> = sources
+                    .spans(disk)
                     .iter()
-                    .filter_map(|&id| match sources.source(id)?.kind {
-                        SourceKind::Volume { start, len, .. } => Some((id, start, len)),
-                        SourceKind::Host | SourceKind::WholeDisk { .. } => None,
+                    .filter_map(|span| {
+                        let lead = span.lead(Some(live))?;
+                        Some((lead, span.start, span.len, span.volumes.len()))
                     })
                     .collect();
-                let ranges: Vec<(u64, u64)> = volumes.iter().map(|&(_, s, l)| (s, l)).collect();
+                let ranges: Vec<(u64, u64)> = volumes.iter().map(|&(_, s, l, _)| (s, l)).collect();
                 let mut parts = Vec::new();
                 let mut bars = Vec::new();
                 let mut current_index = None;
@@ -933,6 +952,7 @@ impl StorageBar {
                             current: false,
                             bytes: segment.len,
                             used: None,
+                            shared: 0,
                         });
                         bars.push(BarPartition {
                             bytes: segment.len,
@@ -941,13 +961,13 @@ impl StorageBar {
                         });
                         continue;
                     };
-                    let Some(&(id, _, _)) = volumes.get(index) else {
+                    let Some(&(id, _, _, shared)) = volumes.get(index) else {
                         continue;
                     };
                     let Some(source) = sources.source(id) else {
                         continue;
                     };
-                    let is_current = id == current;
+                    let is_current = id == live;
                     let info = source.fs.info();
                     let used = info
                         .total_bytes
@@ -1008,6 +1028,7 @@ impl StorageBar {
                         current: is_current,
                         bytes: segment.len,
                         used: known_used,
+                        shared,
                     });
                     bars.push(BarPartition {
                         bytes: segment.len,
@@ -1029,7 +1050,8 @@ impl StorageBar {
                     Some(IndexState::Ready(_)) => Status::Measuring,
                     Some(IndexState::Failed(_)) => Status::None,
                     Some(IndexState::Absent) | None => {
-                        if index_on_open(cx) {
+                        // A snapshot is never read on open: its index builds on first use.
+                        if index_on_open(cx) && current_source.snapshot.is_none() {
                             Status::Reading(0)
                         } else {
                             Status::Calculate(current)
@@ -1244,7 +1266,7 @@ impl Render for StorageBar {
         let mut stop_of: Vec<(usize, Option<Piece>)> = Vec::new();
         for (index, part) in model.parts.iter().enumerate() {
             stops.push(Stop {
-                name: format!("{}, {}", part.name, part.caption).into(),
+                name: part.spoken().into(),
                 act: part.source.map_or(Act::Nothing, Act::Open),
             });
             stop_of.push((index, None));
@@ -1696,7 +1718,7 @@ impl StorageBar {
                         Some(Fill::Unallocated) => {
                             format!("Unallocated space, {}", format::size(part.bytes))
                         }
-                        _ => format!("{}, {}", part.name, part.caption),
+                        _ => part.spoken(),
                     }
                     .into();
                     let target = part.source;

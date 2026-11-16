@@ -956,10 +956,19 @@ pub fn xattrs_item(xattrs: &Result<Vec<XattrInfo>, SharedString>) -> SectionStat
 
 /// The Finder's tag colours in the order of the stored number, 1 to 7.
 fn tag_colour(colour: u8) -> Option<&'static str> {
-    [None, Some("Gray"), Some("Green"), Some("Purple"), Some("Blue"), Some("Yellow"), Some("Red"), Some("Orange")]
-        .get(usize::from(colour))
-        .copied()
-        .flatten()
+    [
+        None,
+        Some("Gray"),
+        Some("Green"),
+        Some("Purple"),
+        Some("Blue"),
+        Some("Yellow"),
+        Some("Red"),
+        Some("Orange"),
+    ]
+    .get(usize::from(colour))
+    .copied()
+    .flatten()
 }
 
 /// What the Mac attributes say, in words: where a file came from, when and by what it was
@@ -969,8 +978,10 @@ pub fn mac_attribute_facts(attributes: &MacAttributes) -> Vec<Fact> {
     if let Some(origin) = attributes.where_from.first() {
         let mut fact = Fact::new("Where from", origin.clone());
         if attributes.where_from.len() > 1 {
-            fact = fact.copying(attributes.where_from.join("
-"));
+            fact = fact.copying(attributes.where_from.join(
+                "
+",
+            ));
         }
         rows.push(fact);
     }
@@ -1225,11 +1236,23 @@ mod tests {
                 uuid: None,
             }),
             where_from: vec!["https://a.example/f.zip".into()],
-            tags: vec![Tag { name: "Work".into(), colour: 6 }, Tag { name: "Plain".into(), colour: 0 }],
+            tags: vec![
+                Tag {
+                    name: "Work".into(),
+                    colour: 6,
+                },
+                Tag {
+                    name: "Plain".into(),
+                    colour: 0,
+                },
+            ],
             comment: None,
         };
         let rows = mac_attribute_facts(&attributes);
-        let text: Vec<(&str, &str)> = rows.iter().map(|f| (f.label.as_ref(), f.value.as_ref())).collect();
+        let text: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|f| (f.label.as_ref(), f.value.as_ref()))
+            .collect();
         assert_eq!(text[0], ("Where from", "https://a.example/f.zip"));
         assert_eq!(text[1].0, "Downloaded");
         assert!(text[1].1.ends_with(", by Safari"));

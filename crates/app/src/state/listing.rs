@@ -1510,7 +1510,10 @@ impl Listing {
         self.row(position).is_some_and(|row| {
             row.entry.kind == disk_atlas_lib::fs::NodeKind::Symlink
                 || (row.entry.kind == disk_atlas_lib::fs::NodeKind::File
-                    && row.entry.flags.contains(disk_atlas_lib::fs::EntryFlags::ALIAS))
+                    && row
+                        .entry
+                        .flags
+                        .contains(disk_atlas_lib::fs::EntryFlags::ALIAS))
         })
     }
 

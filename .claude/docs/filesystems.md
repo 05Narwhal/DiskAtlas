@@ -106,6 +106,8 @@ Little-endian. Primary source: Apple File System Reference.
 - Each volume has a superblock (`APSB`), its own object map, and a file-system tree. Tree keys combine an object ID with a record type in the top four bits: inode, extended attribute, sibling link, data stream, file extent, directory entry and others. Directory entry keys carry a hash of the normalized name on case-insensitive volumes.
 - Timestamps are nanoseconds since 1970 UTC. Compression uses the same `com.apple.decmpfs` scheme as HFS+.
 - Plan for snapshots, multiple volumes sharing free space, sealed system volumes, and Fusion containers as separate steps. Encryption: software-encrypted volumes unlock through the keybag with the user's password; hardware-bound volumes do not.
+- **Sealed volumes (macOS 11+) are read without checksums.** Their file-system tree and file-extent tree are stored with no object headers (the first 32 bytes of each node are zero), so a flipped bit in a node is not caught by a checksum. Apple protects them with a hash tree instead, which this reader does not verify (it would need the seal's root hash chain). Node structure is still validated in full. (M7, `apfs/btree.rs`.)
+- **The secondary file-system root (incompatible feature `0x100`) is not read.** Such a volume mounts and its main tree is shown; an entry that lives only in the secondary tree does not appear. A real disk that shows missing files because of this is a stop-and-ask (`design/m7-apfs.md` §3.6).
 
 ## Copying files out
 

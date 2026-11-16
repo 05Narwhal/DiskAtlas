@@ -140,6 +140,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "apfs_mount"
+path = "fuzz_targets/apfs_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bplist"
 path = "fuzz_targets/bplist.rs"
 test = false
@@ -198,6 +205,13 @@ bench = false
 [[bin]]
 name = "ext_mount"
 path = "fuzz_targets/ext_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apfs_btree_node"
+path = "fuzz_targets/apfs_btree_node.rs"
 test = false
 doc = false
 bench = false

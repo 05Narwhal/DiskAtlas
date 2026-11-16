@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
-use disk_atlas_lib::fs::hfs::encoding::Encoding;
 use disk_atlas_lib::fs::Timestamp;
+use disk_atlas_lib::fs::hfs::encoding::Encoding;
 use disk_atlas_lib::io::block::BlockSource;
 
 use crate::format;
